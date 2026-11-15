@@ -329,6 +329,20 @@ export function durableAhp(opts: DurableAhpOptions) {
     acp: (acpOpts: { cwd?: string; contextWindow?: number } = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
     conversation,
     catalogue,
+    // A conversation made before this host kept the catalogue (another host's, say) as a session, with what's known
+    // of it; false for a session that's known already.
+    async adopt(session: string, id: ConversationId, known: { title?: string; created?: string; meta?: Record<string, unknown> } = {}) {
+      if ((await read()).ids[session]) return false;
+      await update((d) => {
+        if (d.ids[session]) return;
+        d.ids[session] = String(id);
+        d.created[session] = known.created ?? new Date().toISOString();
+        if (known.title) d.titles[session] = known.title;
+        if (known.meta) d.meta[session] = JSON.stringify(known.meta);
+      });
+      void catalogue().then((all) => host.notify(ROOT, "root/sessionAdded", { summary: all.find((s) => s.resource === `${SESSION}${session}`) }), quiet);
+      return true;
+    },
     changed: (session: string) => changed(session).catch(quiet),
     // The Harness was opened again (after a storage failure): sessions and chats are found afresh when next asked for.
     reset() {
@@ -347,4 +361,4 @@ export function durableAhp(opts: DurableAhpOptions) {
 
 const act = (action: object) => action as StateAction;
 // Updates for clients that can wait for the next change (the Harness reopening, say).
-const quiet = (err: unknown) => console.error(`pi-durable-ahp: ${(err as Error).message ?? err}`);
+const quiet = (err: unknown) => console.error(`pi-durable-acp-ahp: ${(err as Error).message ?? err}`);

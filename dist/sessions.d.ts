@@ -69,6 +69,11 @@ export declare function durableAhp(opts: DurableAhpOptions): {
         }[];
         _meta?: Record<string, unknown> | undefined;
     }[]>;
+    adopt(session: string, id: ConversationId, known?: {
+        title?: string;
+        created?: string;
+        meta?: Record<string, unknown>;
+    }): Promise<boolean>;
     changed: (session: string) => Promise<void>;
     reset(): void;
     accept: (ws: WebSocket) => void;
