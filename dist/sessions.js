@@ -1,6 +1,7 @@
 import { defineDoc } from "@earendil-works/pi-durable";
 import { WebSocketServer } from "ws";
 import { chatState, DurableChat } from "./chat.js";
+import { acpFront } from "./acp.js";
 import { AhpHost, ROOT } from "./host.js";
 // pi-durable conversations as AHP sessions: ahp-session:/<id>, whose default chat (ahp-chat:/<id>) is the
 // conversation, opened when a client first looks. A session's other chats (ahp-chat:/<id>/<key>: its subagents, say)
@@ -261,6 +262,15 @@ export function durableAhp(opts) {
                 else if (key !== undefined)
                     void opts.send?.(session, key, text).catch(quiet);
             }
+            // A message for while a turn runs (steering it, or queued for after it).
+            if (a.type === "chat/pendingMessageSet") {
+                const p = action;
+                const text = p.message?.text ?? "";
+                if (chat)
+                    void chat.pending(p.kind, p.id, text).catch(quiet);
+                else if (key !== undefined)
+                    void opts.send?.(session, key, text).catch(quiet);
+            }
             if (a.type === "chat/turnCancelled") {
                 if (key !== undefined && opts.cancel)
                     void opts.cancel(session, key).catch(quiet);
@@ -286,6 +296,8 @@ export function durableAhp(opts) {
     const sockets = new WebSocketServer({ noServer: true });
     return {
         host,
+        // The Agent Client Protocol over the same sessions (acp.ts).
+        acp: (acpOpts = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
         conversation,
         catalogue,
         changed: (session) => changed(session).catch(quiet),

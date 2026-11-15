@@ -48,6 +48,7 @@ export declare class DurableChat {
     get running(): boolean;
     open(title: string, meta?: Record<string, unknown>): Promise<void>;
     started(turnId: string, text: string): Promise<void>;
+    pending(kind: "steering" | "queued", id: string, text: string): Promise<void>;
     refused(turnId: string, why: string): void;
     cancel(): Promise<void>;
     busy(): Promise<boolean>;

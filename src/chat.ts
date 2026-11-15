@@ -65,6 +65,8 @@ export class DurableChat {
   // The turn under way: its id (a client's, or the input entry's), when it started, and whether its input is in yet.
   #turn?: { id: string; started: number; placed: boolean };
   #running = false;
+  // Clients' messages for while a turn runs, until the conversation takes each in.
+  readonly #pending: { kind: "steering" | "queued"; id: string }[] = [];
   readonly #seen = new Set<string>();
 
   readonly host: AhpHost;
@@ -140,6 +142,20 @@ export class DurableChat {
     if (m.role === "user") {
       // A client's turn is already started; anything else (a text, a wake) starts its own.
       if (this.#turn && !this.#turn.placed) return void (this.#turn.placed = true);
+      // A client's steering message, taken into the turn under way: no longer pending.
+      const steered = this.#turn && this.#running ? this.#pending.findIndex((p) => p.kind === "steering") : -1;
+      if (steered >= 0) {
+        const [p] = this.#pending.splice(steered, 1);
+        return this.#dispatch({ type: "chat/pendingMessageRemoved", kind: p.kind, id: p.id });
+      }
+      // A client's queued message, now a turn of its own.
+      const queued = this.#pending.findIndex((p) => p.kind === "queued");
+      if (queued >= 0) {
+        const [p] = this.#pending.splice(queued, 1);
+        this.#dispatch({ type: "chat/pendingMessageRemoved", kind: p.kind, id: p.id });
+      }
+      // The run carries on with a follow-up once it has answered (pi-durable's "followUp"): that answer ended its turn.
+      if (this.#turn) this.#dispatch({ type: "chat/turnComplete", turnId: this.#turn.id, duration: Date.now() - this.#turn.started });
       this.#turn = { id: String(e.id), started: Date.now(), placed: true };
       this.#dispatch({ type: "chat/turnStarted", turnId: this.#turn.id, startedAt: now(), message: { text: this.said(textOf(m)), origin: originOf(e) } });
       this.onStatus?.(8);
@@ -178,6 +194,14 @@ export class DurableChat {
     this.onStatus?.(8);
     if (this.send) return this.send(text, turnId);
     await this.conversation.submit({ type: "input", content: this.input(text), requestId: turnId }, this.ctx);
+  }
+
+  // A client's message for while a turn runs (its action is committed already): "steering" reaches the run at its next
+  // step, "queued" waits for it to answer and then starts a turn of its own. Pending until the conversation takes it in.
+  async pending(kind: "steering" | "queued", id: string, text: string) {
+    this.#pending.push({ kind, id });
+    if (this.send) return this.send(text, id);
+    await this.conversation.submit({ type: "input", content: this.input(text), whenBusy: kind === "steering" ? "steer" : "followUp", requestId: id }, this.ctx);
   }
 
   // A client's turn that never reached the conversation (it was refused), ended with why.

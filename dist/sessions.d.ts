@@ -40,6 +40,14 @@ export interface DurableAhpOptions {
 }
 export declare function durableAhp(opts: DurableAhpOptions): {
     host: AhpHost;
+    acp: (acpOpts?: {
+        cwd?: string;
+        contextWindow?: number;
+    }) => {
+        http: (req: IncomingMessage, res: import("http").ServerResponse) => void;
+        upgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
+        stdio: () => import("@agentclientprotocol/sdk").AgentConnection;
+    };
     conversation: (session: string) => Promise<Conversation>;
     catalogue: () => Promise<{
         resource: string;

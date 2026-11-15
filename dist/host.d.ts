@@ -1,5 +1,4 @@
 import { type ActionEnvelope, type StateAction, type URI } from "@microsoft/agent-host-protocol";
-import type { WebSocket } from "ws";
 export declare const ROOT = "ahp-root://";
 type State = Record<string, unknown>;
 export interface AhpHandlers {
@@ -13,6 +12,12 @@ export interface AhpHandlers {
     acted?(channel: URI, action: StateAction, clientId: string): void;
     methods?: Record<string, (params: Record<string, unknown>, clientId: string) => Promise<unknown>>;
 }
+export interface Socket {
+    readonly readyState: number;
+    send(text: string): void;
+    on(event: "message", listener: (data: unknown) => void): unknown;
+    on(event: "close", listener: () => void): unknown;
+}
 export declare class AhpHost {
     #private;
     constructor(handlers: AhpHandlers, info: {
@@ -25,6 +30,13 @@ export declare class AhpHost {
     delete(uri: URI): void;
     dispatch(channel: URI, action: StateAction, origin?: ActionEnvelope["origin"]): void;
     notify(channel: URI, method: string, params: object): void;
-    accept(socket: WebSocket): void;
+    local(onMessage: (message: {
+        method: string;
+        params: Record<string, unknown>;
+    }) => void): {
+        request<T = unknown>(method: string, params: object): Promise<T>;
+        close(): void;
+    };
+    accept(socket: Socket): void;
 }
 export {};

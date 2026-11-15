@@ -5,6 +5,7 @@ import { type Conversation, type ConversationId, defineDoc, type Harness } from 
 import type { StateAction, URI } from "@microsoft/agent-host-protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { chatState, DurableChat } from "./chat.ts";
+import { acpFront } from "./acp.ts";
 import { AhpHost, ROOT } from "./host.ts";
 
 // pi-durable conversations as AHP sessions: ahp-session:/<id>, whose default chat (ahp-chat:/<id>) is the
@@ -291,6 +292,13 @@ export function durableAhp(opts: DurableAhpOptions) {
           // A chat without a conversation (yet): the caller's to pass on.
           else if (key !== undefined) void opts.send?.(session, key, text).catch(quiet);
         }
+        // A message for while a turn runs (steering it, or queued for after it).
+        if (a.type === "chat/pendingMessageSet") {
+          const p = action as unknown as { kind: "steering" | "queued"; id: string; message?: { text: string } };
+          const text = p.message?.text ?? "";
+          if (chat) void chat.pending(p.kind, p.id, text).catch(quiet);
+          else if (key !== undefined) void opts.send?.(session, key, text).catch(quiet);
+        }
         if (a.type === "chat/turnCancelled") {
           if (key !== undefined && opts.cancel) void opts.cancel(session, key).catch(quiet);
           else void chat?.cancel().catch(quiet);
@@ -317,6 +325,8 @@ export function durableAhp(opts: DurableAhpOptions) {
   const sockets = new WebSocketServer({ noServer: true });
   return {
     host,
+    // The Agent Client Protocol over the same sessions (acp.ts).
+    acp: (acpOpts: { cwd?: string; contextWindow?: number } = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
     conversation,
     catalogue,
     changed: (session: string) => changed(session).catch(quiet),
