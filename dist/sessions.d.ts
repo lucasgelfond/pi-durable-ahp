@@ -62,6 +62,7 @@ export declare function durableAhp(opts: DurableAhpOptions): {
         _meta?: Record<string, unknown> | undefined;
     }[]>;
     changed: (session: string) => Promise<void>;
+    reset(): void;
     accept: (ws: WebSocket) => void;
     upgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 };

@@ -289,6 +289,16 @@ export function durableAhp(opts) {
         conversation,
         catalogue,
         changed: (session) => changed(session).catch(quiet),
+        // The Harness was opened again (after a storage failure): sessions and chats are found afresh when next asked for.
+        reset() {
+            conversations.clear();
+            for (const uri of chats.keys())
+                host.delete(uri);
+            chats.clear();
+            for (const session of shown.keys())
+                (host.delete(chatUri(session)), host.delete(`${SESSION}${session}`));
+            shown.clear();
+        },
         // A client on its WebSocket.
         accept: (ws) => host.accept(ws),
         // An HTTP server's upgrade to AHP (at whatever path it serves it on).
