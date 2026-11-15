@@ -194,6 +194,7 @@ export class AhpHost {
         }
         return { protocolVersion: PROTOCOL_VERSION, serverSeq: this.#seq, serverInfo: this.#info, snapshots };
       }
+      // TODO: AHP PR #494 changes reconnect; follow it once it lands.
       case "reconnect": {
         client.id = String(params.clientId);
         const known = this.#known.has(client.id);
@@ -229,6 +230,7 @@ export class AhpHost {
         return void (await this.#handlers.disposeSession?.(String(params.channel)));
       case "createChat":
         return void (await this.#handlers.createChat?.(params, clientId));
+      // TODO: disposeChat isn't a standard AHP command; move to the spec's way of deleting a chat once there is one.
       case "disposeChat":
         return void (await this.#handlers.disposeChat?.(String(params.channel)));
       case "dispatchAction": {

@@ -204,6 +204,8 @@ export function acpFront(host, opts) {
             .onRequest(acp.methods.agent.initialize, () => ({
             protocolVersion: acp.PROTOCOL_VERSION,
             agentInfo: opts.info,
+            // TODO: permission prompts (session/request_permission, bridged to AHP's tool calls waiting for confirmation;
+            // the first answer wins), and subagents as ACP's Subagents RFD has them (subagent_update, for clients that ask).
             agentCapabilities: {
                 loadSession: true,
                 sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} },

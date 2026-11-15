@@ -68,6 +68,10 @@ export interface DurableAhpOptions {
   said?(text: string): string;
   // Methods of the caller's own (x-<name>/…).
   methods?: Record<string, (params: Record<string, unknown>, clientId: string) => Promise<unknown>>;
+  // TODO: sessions backed by an ACP agent process (Claude Code, pi-acp, Gemini CLI; one per chat, its session id kept,
+  // session/load after a restart), so a terminal's own agents go through this host too.
+  // TODO: hooks for the caller's crons as AHP automations and its skills as AHP customizations (it keeps the stores).
+  // TODO: subagent chats whose origin is the tool call that started them ({kind: "tool", chat, toolCallId}).
 }
 
 export function durableAhp(opts: DurableAhpOptions) {
@@ -326,6 +330,7 @@ export function durableAhp(opts: DurableAhpOptions) {
   return {
     host,
     // The Agent Client Protocol over the same sessions (acp.ts).
+    // TODO: a pi-durable-acp-ahp/acp entry point instead, so a host without ACP doesn't load the ACP SDK.
     acp: (acpOpts: { cwd?: string; contextWindow?: number } = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
     conversation,
     catalogue,

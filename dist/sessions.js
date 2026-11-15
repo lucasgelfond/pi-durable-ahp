@@ -297,6 +297,7 @@ export function durableAhp(opts) {
     return {
         host,
         // The Agent Client Protocol over the same sessions (acp.ts).
+        // TODO: a pi-durable-acp-ahp/acp entry point instead, so a host without ACP doesn't load the ACP SDK.
         acp: (acpOpts = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
         conversation,
         catalogue,
