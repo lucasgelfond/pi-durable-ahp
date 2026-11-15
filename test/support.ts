@@ -58,7 +58,8 @@ export const model = { provider: "faux", modelId: "faux-1" };
 // The app's subagents: each session's, as chats beside it.
 export const subagents = new Map<string, Chat[]>();
 
-export function serve(opts: { methods?: Record<string, (params: Record<string, unknown>) => Promise<unknown>> } = {}) {
+// `refuse`: subagents refuse what clients send them (as a task that has ended would).
+export function serve(opts: { methods?: Record<string, (params: Record<string, unknown>) => Promise<unknown>>; refuse?: boolean } = {}) {
   const ahp = durableAhp({
     harness: () => harness,
     context: ctx,
@@ -67,6 +68,7 @@ export function serve(opts: { methods?: Record<string, (params: Record<string, u
     create: (session) => harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, ctx).then((c) => (void session, c)),
     meta: (session) => ({ test: { subagents: (subagents.get(session) ?? []).length } }),
     chats: (session) => subagents.get(session) ?? [],
+    ...(opts.refuse && { send: async () => "not taking messages" }),
     methods: opts.methods,
   });
   const acp = ahp.acp({ cwd: "/work", contextWindow: 100_000 });

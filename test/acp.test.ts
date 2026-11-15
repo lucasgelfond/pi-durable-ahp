@@ -69,14 +69,34 @@ for (const transport of ["http", "ws"] as const) {
       close();
     });
 
-    test("a prompt while a turn runs steers it, and is answered when that turn ends", async () => {
+    test("a prompt while a turn runs is queued: a turn of its own once that one has answered", async () => {
+      const { port, url, close } = await serve();
+      const watcher = await client(url);
+      await connect(port, transport, async (c, updates) => {
+        const { sessionId } = await c.request(acp.methods.agent.session.new, { cwd: "/", mcpServers: [] });
+        const watched = await follow(watcher.c, `ahp-chat:/${sessionId}`);
+        const first = c.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "slow first" }] });
+        await new Promise((r) => setTimeout(r, 150));
+        const second = c.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "and then this" }] });
+        expect([(await first).stopReason, (await second).stopReason]).toEqual(["end_turn", "end_turn"]);
+        await until(() => texts(updates, sessionId).includes("echo: and then this"));
+        // Two turns, the second the queued prompt's.
+        await until(() => watched.state.turns.length === 2);
+        expect(watched.state.turns.map((t) => t.message.text)).toEqual(["slow first", "and then this"]);
+      });
+      watcher.ws.close();
+      close();
+    });
+
+    test("_session/steering puts a message into the turn under way, or asks for a prompt when there's none", async () => {
       const { port, ahp, close } = await serve();
       await connect(port, transport, async (c, updates) => {
         const { sessionId } = await c.request(acp.methods.agent.session.new, { cwd: "/", mcpServers: [] });
+        expect(await c.request("_session/steering", { sessionId, prompt: [{ type: "text", text: "nothing running" }] })).toEqual({ outcome: "promptRequired" });
         const first = c.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "slow first" }] });
         await new Promise((r) => setTimeout(r, 150));
-        const second = c.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "and steer here" }] });
-        expect([(await first).stopReason, (await second).stopReason]).toEqual(["end_turn", "end_turn"]);
+        expect(await c.request("_session/steering", { sessionId, prompt: [{ type: "text", text: "and steer here" }] })).toEqual({ outcome: "injected" });
+        expect((await first).stopReason).toBe("end_turn");
         await until(() => texts(updates, sessionId).includes("echo: and steer here"));
         const context = await (await ahp.conversation(sessionId)).context(ctx);
         expect(context.messages.some((m) => m.role === "user" && JSON.stringify(m.content).includes("and steer here"))).toBe(true);
@@ -174,4 +194,65 @@ test("over stdio, as an editor starts an agent: a session and a prompt", async (
     });
   agent.kill();
   expect(stop).toBe("end_turn");
+});
+
+test("another client's turn ends with _session/turn_complete; a resource link is part of a prompt", async () => {
+  const { port, close } = await serve();
+  await connect(port, "ws", async (a) => {
+    const { sessionId } = await a.request(acp.methods.agent.session.new, { cwd: "/", mcpServers: [] });
+    const ended: unknown[] = [];
+    const updates: Updates = [];
+    const stream = createWebSocketStream(`ws://127.0.0.1:${port}/acp`);
+    await acp
+      .client({ name: "watcher" })
+      .onNotification(acp.methods.client.session.update, ({ params }) => void updates.push(params))
+      .onNotification("_session/turn_complete", (p) => p, ({ params }) => void ended.push(params))
+      .connectWith(stream, async (b) => {
+        await b.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+        await b.request(acp.methods.agent.session.resume, { sessionId, cwd: "/", mcpServers: [] });
+        await a.request(acp.methods.agent.session.prompt, {
+          sessionId,
+          prompt: [
+            { type: "text", text: "look at" },
+            { type: "resource_link", uri: "file:///work/notes.txt", name: "notes.txt" },
+          ],
+        });
+        await until(() => ended.length === 1);
+        expect(ended[0]).toMatchObject({ sessionId, stopReason: "end_turn" });
+        expect(texts(updates, sessionId, "user_message_chunk")).toEqual(["look at\n[notes.txt](file:///work/notes.txt)"]);
+      });
+  });
+  close();
+});
+
+test("a failed turn fails its prompt; closing a session answers its waiting prompts as cancelled", async () => {
+  const { port, close } = await serve({ refuse: true });
+  await connect(port, "http", async (c) => {
+    // A subagent that refuses messages: the prompt fails with why.
+    const { sessionId } = await c.request(acp.methods.agent.session.new, { cwd: "/", mcpServers: [] });
+    const child = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, ctx);
+    subagents.set(sessionId, [{ key: "1", title: "busy elsewhere", conversation: child.id }]);
+    await expect(c.request(acp.methods.agent.session.prompt, { sessionId: `${sessionId}/1`, prompt: [{ type: "text", text: "hello" }] })).rejects.toThrow(/not taking messages/);
+    // Closing while a prompt waits.
+    const waiting = c.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "slow one" }] });
+    await new Promise((r) => setTimeout(r, 100));
+    await c.request(acp.methods.agent.session.close, { sessionId });
+    expect((await waiting).stopReason).toBe("cancelled");
+  });
+  close();
+});
+
+test("loading a session mid-turn shows the turn under way", async () => {
+  const { port, close } = await serve();
+  await connect(port, "ws", async (a) => {
+    const { sessionId } = await a.request(acp.methods.agent.session.new, { cwd: "/", mcpServers: [] });
+    const running = a.request(acp.methods.agent.session.prompt, { sessionId, prompt: [{ type: "text", text: "slow and steady" }] });
+    await new Promise((r) => setTimeout(r, 100));
+    await connect(port, "http", async (b, updates) => {
+      await b.request(acp.methods.agent.session.load, { sessionId, cwd: "/", mcpServers: [] });
+      expect(texts(updates, sessionId, "user_message_chunk")).toEqual(["slow and steady"]);
+    });
+    await running;
+  });
+  close();
 });

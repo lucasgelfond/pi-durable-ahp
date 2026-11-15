@@ -7,6 +7,7 @@ import { PROTOCOL_VERSION } from "@microsoft/agent-host-protocol";
 import { WebSocketServer } from "ws";
 import { ROOT } from "./host.js";
 const CHAT = "ahp-chat:/";
+const SESSION = "ahp-session:/";
 const text = (t) => ({ type: "text", text: t });
 const input = (raw) => {
     try {
@@ -59,8 +60,10 @@ export function acpFront(host, opts) {
     // One agent per ACP connection, holding what that connection follows.
     function createAgent() {
         let client;
-        // Each followed session: the turn under way, the turns this connection started, and the prompts waiting on them.
+        // Each followed session: the turn under way, the turns this connection started and the prompts waiting on them,
+        // its queued prompts (until the host makes each a turn), its steering messages, and its tool calls' names.
         const followed = new Map();
+        const extension = (method, params) => void client?.notify(method, params).catch(() => { });
         const notify = (sessionId, update) => void client?.notify(acp.methods.client.session.update, { sessionId, update }).catch(() => { });
         let seq = 0;
         const clientId = `acp-${randomUUID()}`;
@@ -68,24 +71,46 @@ export function acpFront(host, opts) {
             if (method !== "action")
                 return;
             const e = params;
+            const a = e.action;
+            // A session's or one of its chats' new title.
+            if (e.channel.startsWith(SESSION)) {
+                const session = e.channel.slice(SESSION.length);
+                if (a.type === "session/titleChanged" && followed.has(session))
+                    notify(session, { sessionUpdate: "session_info_update", title: a.title, updatedAt: new Date().toISOString() });
+                const chat = a.type === "session/chatUpdated" && a.chat?.startsWith(CHAT) ? a.chat.slice(CHAT.length) : undefined;
+                if (chat && chat !== session && followed.has(chat) && a.changes?.title)
+                    notify(chat, { sessionUpdate: "session_info_update", title: a.changes.title, updatedAt: a.changes.modifiedAt ?? new Date().toISOString() });
+                return;
+            }
             if (!e.channel.startsWith(CHAT))
                 return;
             const sessionId = e.channel.slice(CHAT.length);
             const f = followed.get(sessionId);
             if (!f)
                 return;
-            const a = e.action;
-            // A turn this connection asked for that the host refused (one already running, say).
+            // An action this connection sent that the host refused (a turn while one runs, say): the prompt fails with why.
             if (e.rejectionReason) {
                 if (e.origin?.clientId === clientId && a.turnId)
-                    finish(f, a.turnId, "refusal");
+                    fail(f, a.turnId, e.rejectionReason);
                 return;
             }
-            const ends = { "chat/turnComplete": "end_turn", "chat/turnCancelled": "cancelled", "chat/error": "end_turn" };
             if (a.type === "chat/turnStarted") {
                 f.turn = a.turnId;
-                if (!f.own.has(a.turnId))
+                // A queued prompt of this connection's, now its own turn.
+                if (f.next)
+                    (f.own.add(a.turnId), f.waiting.set(a.turnId, f.next), (f.next = undefined));
+                else if (!f.own.has(a.turnId))
                     notify(sessionId, { sessionUpdate: "user_message_chunk", content: text(a.message?.text ?? ""), messageId: a.turnId });
+            }
+            else if (a.type === "chat/pendingMessageRemoved" && a.id) {
+                const q = f.queued.get(a.id);
+                if (q)
+                    (f.queued.delete(a.id), (f.next = q));
+                f.steers.delete(a.id);
+            }
+            else if (a.type === "chat/pendingMessageSet" && a.kind === "steering" && !f.steers.has(a.id ?? "")) {
+                // Another client's steering message: shown as the user's, since the turn keeps no record of it.
+                notify(sessionId, { sessionUpdate: "user_message_chunk", content: text(a.message?.text ?? "") });
             }
             else if (a.type === "chat/responsePart" && a.part)
                 for (const u of parted(a.part, cwd))
@@ -102,28 +127,62 @@ export function acpFront(host, opts) {
                 notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId, status: a.result?.success === false ? "failed" : "completed", content: toolContent(a.result?.content) });
             else if (a.type === "chat/usage" && a.usage && opts.contextWindow)
                 notify(sessionId, { sessionUpdate: "usage_update", used: a.usage.inputTokens + (a.usage.cacheReadTokens ?? 0) + a.usage.outputTokens, size: opts.contextWindow });
-            else if (a.type in ends && a.turnId)
-                finish(f, a.turnId, ends[a.type]);
+            else if (a.type === "chat/turnComplete" && a.turnId)
+                finish(f, sessionId, a.turnId, "end_turn");
+            else if (a.type === "chat/turnCancelled" && a.turnId)
+                finish(f, sessionId, a.turnId, "cancelled");
+            else if (a.type === "chat/error" && a.turnId) {
+                const why = a.part?.error?.message ?? "the turn failed";
+                if (f.waiting.has(a.turnId))
+                    fail(f, a.turnId, why);
+                else
+                    finish(f, sessionId, a.turnId, "end_turn", why);
+            }
         });
         const ready = ahp.request("initialize", { clientId, protocolVersions: [PROTOCOL_VERSION], initialSubscriptions: [] });
         const dispatch = (sessionId, action) => ahp.request("dispatchAction", { channel: `${CHAT}${sessionId}`, action, clientSeq: ++seq });
-        function finish(f, turnId, stop) {
+        // A turn ended: the prompt waiting on it answered, or (another client's turn) the end told as an extension.
+        function finish(f, sessionId, turnId, stop, error) {
+            if (f.turn === turnId)
+                f.turn = undefined;
+            const mine = f.own.delete(turnId);
+            const w = f.waiting.get(turnId);
+            f.waiting.delete(turnId);
+            if (w)
+                w.resolve(stop);
+            if (!mine)
+                extension("_session/turn_complete", { sessionId, turnId, stopReason: stop, ...(error && { error }) });
+        }
+        // A turn of this connection's that failed (or was refused): its prompt fails, as ACP has a failed prompt.
+        function fail(f, turnId, why) {
             if (f.turn === turnId)
                 f.turn = undefined;
             f.own.delete(turnId);
-            // The prompts waiting on it (its own, and any that steered it); a refused one only answers its own.
-            for (const [id, resolves] of [...f.waiting])
-                if (id === turnId || stop !== "refusal")
-                    (f.waiting.delete(id), resolves.forEach((resolve) => resolve(stop)));
+            const w = f.waiting.get(turnId);
+            f.waiting.delete(turnId);
+            w?.reject(acp.RequestError.internalError(undefined, why));
         }
+        // What a prompt says: its text, and its links (every agent takes resource links) and embedded text as text.
+        const said = (prompt) => prompt
+            .flatMap((b) => b.type === "text"
+            ? [b.text]
+            : b.type === "resource_link"
+                ? [`[${b.title ?? b.name}](${b.uri})`]
+                : b.type === "resource" && "text" in b.resource
+                    ? [`${b.resource.uri}:\n${b.resource.text}`]
+                    : [])
+            .join("\n")
+            .trim();
         // A session's chat, followed from now on: its state as it is.
         async function follow(sessionId) {
             await ready;
             const { snapshot } = await ahp.request("subscribe", { channel: `${CHAT}${sessionId}` }).catch(() => {
                 throw acp.RequestError.resourceNotFound(sessionId);
             });
+            // Its session's too, for titles.
+            await ahp.request("subscribe", { channel: `${SESSION}${sessionId.split("/")[0]}` }).catch(() => { });
             if (!followed.has(sessionId))
-                followed.set(sessionId, { turn: snapshot?.state.activeTurn?.id, own: new Set(), waiting: new Map(), tools: new Map() });
+                followed.set(sessionId, { turn: snapshot?.state.activeTurn?.id, own: new Set(), waiting: new Map(), queued: new Map(), steers: new Set(), tools: new Map() });
             return snapshot?.state;
         }
         const sessionsOf = async () => {
@@ -145,7 +204,12 @@ export function acpFront(host, opts) {
             .onRequest(acp.methods.agent.initialize, () => ({
             protocolVersion: acp.PROTOCOL_VERSION,
             agentInfo: opts.info,
-            agentCapabilities: { loadSession: true, sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} }, promptCapabilities: {} },
+            agentCapabilities: {
+                loadSession: true,
+                sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} },
+                promptCapabilities: { embeddedContext: true },
+                _meta: { steering: { supported: true } },
+            },
             authMethods: [],
         }))
             .onRequest(acp.methods.agent.session.list, async () => ({ sessions: await sessionsOf() }))
@@ -161,13 +225,18 @@ export function acpFront(host, opts) {
             .onRequest(acp.methods.agent.session.load, async ({ params, client: c }) => {
             client = c;
             const state = await follow(params.sessionId);
-            for (const turn of state?.turns ?? [])
+            // The turns so far, and one under way as far as it's got.
+            for (const turn of [...(state?.turns ?? []), ...(state?.activeTurn ? [state.activeTurn] : [])])
                 for (const update of replay(turn, cwd))
                     await c.notify(acp.methods.client.session.update, { sessionId: params.sessionId, update });
             return {};
         })
             .onRequest(acp.methods.agent.session.resume, async ({ params, client: c }) => ((client = c), await follow(params.sessionId), {}))
+            // Closed for this connection (other clients may still be on it): its prompts there are answered as cancelled.
             .onRequest(acp.methods.agent.session.close, async ({ params }) => {
+            const f = followed.get(params.sessionId);
+            for (const w of [...(f?.waiting.values() ?? []), ...(f?.queued.values() ?? []), ...(f?.next ? [f.next] : [])])
+                w.resolve("cancelled");
             followed.delete(params.sessionId);
             await ahp.request("unsubscribe", { channel: `${CHAT}${params.sessionId}` });
             return {};
@@ -180,26 +249,40 @@ export function acpFront(host, opts) {
                 await ahp.request("disposeSession", { channel: `ahp-session:/${params.sessionId}` });
             return {};
         })
-            // A turn, answered once it ends; while one runs, the prompt steers it and is answered with it.
+            // A turn, answered once it ends. One sent while a turn runs is queued (pending until that turn has answered),
+            // then is a turn of its own, answered when that one ends.
             .onRequest(acp.methods.agent.session.prompt, async ({ params, client: c }) => {
             client = c;
-            const said = params.prompt.flatMap((b) => (b.type === "text" ? [b.text] : [])).join("\n").trim();
-            if (!said)
+            const text = said(params.prompt);
+            if (!text)
                 throw acp.RequestError.invalidParams(undefined, "a prompt with text, please");
             await follow(params.sessionId);
             const f = followed.get(params.sessionId);
-            const message = { text: said, origin: { kind: "user" } };
+            const message = { text, origin: { kind: "user" } };
             if (f.turn) {
-                const running = f.turn;
-                const done = new Promise((resolve) => f.waiting.set(running, [...(f.waiting.get(running) ?? []), resolve]));
-                await dispatch(params.sessionId, { type: "chat/pendingMessageSet", kind: "steering", id: randomUUID(), message });
+                const id = randomUUID();
+                const done = new Promise((resolve, reject) => f.queued.set(id, { resolve, reject }));
+                await dispatch(params.sessionId, { type: "chat/pendingMessageSet", kind: "queued", id, message });
                 return { stopReason: await done };
             }
             const turnId = randomUUID();
             f.own.add(turnId);
-            const done = new Promise((resolve) => f.waiting.set(turnId, [resolve]));
+            const done = new Promise((resolve, reject) => f.waiting.set(turnId, { resolve, reject }));
             await dispatch(params.sessionId, { type: "chat/turnStarted", turnId, startedAt: new Date().toISOString(), message });
             return { stopReason: await done };
+        })
+            // A message for the turn under way, taken in at its next step (claude-agent-acp's and codex-acp's extension).
+            .onRequest("_session/steering", (raw) => raw, async ({ params: p, client: c }) => {
+            client = c;
+            const text = said(p.prompt ?? []);
+            await follow(p.sessionId);
+            const f = followed.get(p.sessionId);
+            if (!f.turn)
+                return { outcome: "promptRequired" };
+            const id = randomUUID();
+            f.steers.add(id);
+            await dispatch(p.sessionId, { type: "chat/pendingMessageSet", kind: "steering", id, message: { text, origin: { kind: "user" } } });
+            return { outcome: "injected" };
         })
             .onNotification(acp.methods.agent.session.cancel, async ({ params }) => {
             const turnId = followed.get(params.sessionId)?.turn;
