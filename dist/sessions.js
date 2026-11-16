@@ -167,7 +167,18 @@ export function durableAhp(opts) {
         chats.set(uri, chat);
         chat.open(titleOf(session, doc));
     }
-    async function openSession(session) {
+    // Opened once, however many ask at once (a client subscribing as `committed` opens it).
+    const opening = new Map();
+    function openSession(session) {
+        let open = opening.get(session);
+        if (!open) {
+            open = openNow(session);
+            opening.set(session, open);
+            void open.catch(() => { }).finally(() => opening.delete(session));
+        }
+        return open;
+    }
+    async function openNow(session) {
         const uri = `${SESSION}${session}`;
         if (host.has(uri))
             return;

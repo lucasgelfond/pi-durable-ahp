@@ -171,3 +171,17 @@ test("committed: each conversation's entries as they're committed, once each, fr
   close();
 });
 
+
+test("with committed, a session an app creates has its chat to follow at once", async () => {
+  const { url, close } = await serve({ committed: () => {} });
+  const { c, ws } = await client(url);
+  for (const name of ["race-1", "race-2", "race-3"]) {
+    await c.request("createSession", { channel: `ahp-session:/${name}` } as never);
+    const chat = await follow(c, `ahp-chat:/${name}`);
+    c.dispatch(`ahp-chat:/${name}`, { type: "chat/turnStarted", turnId: `t-${name}`, startedAt: new Date().toISOString(), message: { text: `hello ${name}`, origin: { kind: "user" } } } as never);
+    await until(completed(chat));
+    expect(chat.state.turns.at(-1)!.responseParts.map((p) => p.content)).toContain(`echo: hello ${name}`);
+  }
+  ws.close();
+  close();
+});
