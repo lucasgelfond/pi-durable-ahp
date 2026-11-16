@@ -127,30 +127,16 @@ test("a message queued while a turn runs waits for it, then is a turn of its own
   close();
 });
 
-test("a conversation from before the catalogue is adopted as a session: listed with its title and _meta, its history in its chat", async () => {
-  const { ahp, url, close } = await serve();
-  const before = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, ctx);
-  await before.submit({ type: "input", content: "said before the catalogue" }, ctx);
-  expect(await ahp.adopt("old", before.id, { title: "From before", created: "2026-11-01T00:00:00.000Z", meta: { test: { source: "phone" } } })).toBe(true);
-  expect(await ahp.adopt("old", before.id)).toBe(false);
-  const { c, ws } = await client(url);
-  const { items } = await c.request("listSessions", { channel: "ahp-root://" });
-  expect(items.find((s) => s.resource === "ahp-session:/old")).toMatchObject({ title: "From before", createdAt: "2026-11-01T00:00:00.000Z", _meta: { test: { source: "phone" } } });
-  const chat = await follow(c, "ahp-chat:/old");
-  await until(() => chat.state.turns.some((t) => t.message.text === "said before the catalogue"));
-  ws.close();
-  close();
-});
-
 test("committed: each conversation's entries as they're committed, once each, from the chat's own watch, even with no client looking", async () => {
   const seen: { session: string; texts: string[]; key?: string }[] = [];
   const textOf = (e: { model?: readonly { content: unknown }[] }) => JSON.stringify(e.model?.[0]?.content ?? "");
-  const before = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, ctx);
+  // Said in an earlier host's session, answered, so nothing of it is still to come.
+  const earlier = await serve();
+  const before = await earlier.ahp.conversation("watched");
   await before.submit({ type: "input", content: "said before it was opened" }, ctx);
-  // Answered, so nothing of it is still to come.
   while (!(await before.context(ctx)).messages.some((m) => m.role === "assistant")) await new Promise((r) => setTimeout(r, 20));
+  earlier.close();
   const { ahp, url, close } = await serve({ committed: (session, entries, key) => void seen.push({ session, texts: entries.map(textOf), ...(key !== undefined && { key }) }) });
-  await ahp.adopt("watched", before.id);
   // Known to the host, with no client subscribed: its entries are reported as they come.
   const handle = await ahp.conversation("watched");
   await until(() => ahp.host.has("ahp-chat:/watched"));

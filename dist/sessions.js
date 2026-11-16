@@ -395,35 +395,7 @@ export function durableAhp(opts) {
         host,
         conversation,
         catalogue,
-        // A conversation made before this host kept the catalogue (another host's, say) as a session, with what's known
-        // of it; false for a session that's known already.
-        async adopt(session, id, known = {}) {
-            if (session in (await read()).ids)
-                return false;
-            await update((d) => {
-                if (session in d.ids)
-                    return;
-                d.ids[session] = String(id);
-                d.created[session] = known.created ?? new Date().toISOString();
-                if (known.title)
-                    d.titles[session] = known.title;
-                if (known.meta)
-                    d.meta[session] = JSON.stringify(known.meta);
-            });
-            void catalogue().then((all) => host.notify(ROOT, "root/sessionAdded", { summary: all.find((s) => s.resource === `${SESSION}${session}`) }), quiet);
-            return true;
-        },
         changed: (session) => changed(session).catch(quiet),
-        // The Harness was opened again (after a storage failure): sessions and chats are found afresh when next asked for.
-        reset() {
-            conversations.clear();
-            for (const [uri, chat] of chats)
-                (chat instanceof AcpChat && chat.stop(), host.delete(uri));
-            chats.clear();
-            for (const session of shown.keys())
-                (host.delete(chatUri(session)), host.delete(`${SESSION}${session}`));
-            shown.clear();
-        },
         // Every ACP agent's process stopped, as the host closes.
         close() {
             for (const chat of chats.values())
