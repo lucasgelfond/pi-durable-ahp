@@ -50,11 +50,30 @@ function parted(p, cwd) {
         return [{ sessionUpdate: "agent_message_chunk", content: text(p.error?.message ?? "error") }];
     if (p.kind === "toolCall" && p.toolCall) {
         const t = p.toolCall;
+        const seen = t._meta?.acp;
         const { kind, locations, diffs } = shown(t.toolName, input(t.toolInput), cwd);
-        return [{ sessionUpdate: "tool_call", toolCallId: t.toolCallId, title: t.displayName ?? t.toolName ?? "tool", kind, ...(locations && { locations }), status: t.success === false ? "failed" : "completed", rawInput: input(t.toolInput), content: [...diffs, ...toolContent(t.content)] }];
+        return [
+            {
+                sessionUpdate: "tool_call",
+                toolCallId: t.toolCallId,
+                title: t.displayName ?? t.toolName ?? "tool",
+                kind: seen?.kind ?? kind,
+                ...((seen?.locations ?? locations) && { locations: seen?.locations ?? locations }),
+                status: t.success === false ? "failed" : "completed",
+                rawInput: input(t.toolInput),
+                content: seen?.content ?? [...diffs, ...toolContent(t.content)],
+            },
+        ];
     }
     return [];
 }
+// A message as text, whichever way AHP gives it.
+const plain = (m) => (typeof m === "string" ? m : (m?.markdown ?? ""));
+// AHP's two kinds of answer, as ACP's options, for a tool call that came without the agent's own.
+const ANSWERS = [
+    { optionId: "approve", name: "Allow", kind: "allow_once" },
+    { optionId: "deny", name: "Reject", kind: "reject_once" },
+];
 export function acpFront(host, opts) {
     const cwd = opts.cwd ?? "/";
     // One agent per ACP connection, holding what that connection follows.
@@ -62,6 +81,7 @@ export function acpFront(host, opts) {
         let client;
         // Each followed session: the turn under way, the turns this connection started and the prompts waiting on them,
         // its queued prompts (until the host makes each a turn), its steering messages, and its tool calls' names.
+        // And the tool calls it's asking this connection's client about.
         const followed = new Map();
         const extension = (method, params) => void client?.notify(method, params).catch(() => { });
         const notify = (sessionId, update) => void client?.notify(acp.methods.client.session.update, { sessionId, update }).catch(() => { });
@@ -90,7 +110,7 @@ export function acpFront(host, opts) {
                 return;
             // An action this connection sent that the host refused (a turn while one runs, say): the prompt fails with why.
             if (e.rejectionReason) {
-                if (e.origin?.clientId === clientId && a.turnId)
+                if (e.origin?.clientId === clientId && a.type === "chat/turnStarted" && a.turnId)
                     fail(f, a.turnId, e.rejectionReason);
                 return;
             }
@@ -115,16 +135,38 @@ export function acpFront(host, opts) {
             else if (a.type === "chat/responsePart" && a.part)
                 for (const u of parted(a.part, cwd))
                     notify(sessionId, u);
+            else if (a.type === "chat/delta" && a.content)
+                notify(sessionId, { sessionUpdate: "agent_message_chunk", content: text(a.content) });
+            else if (a.type === "chat/reasoning" && a.content)
+                notify(sessionId, { sessionUpdate: "agent_thought_chunk", content: text(a.content) });
             else if (a.type === "chat/toolCallStart") {
+                const seen = a._meta?.acp;
                 f.tools.set(a.toolCallId, a.toolName ?? "");
-                notify(sessionId, { sessionUpdate: "tool_call", toolCallId: a.toolCallId, title: a.displayName ?? a.toolName ?? "tool", kind: kindOf(a.toolName), status: "pending" });
+                notify(sessionId, { sessionUpdate: "tool_call", toolCallId: a.toolCallId, title: a.displayName ?? a.toolName ?? "tool", kind: seen?.kind ?? kindOf(a.toolName), status: "pending", ...(seen?.locations && { locations: seen.locations }) });
             }
             else if (a.type === "chat/toolCallReady") {
-                const { locations, diffs } = shown(f.tools.get(a.toolCallId), input(a.toolInput), cwd);
-                notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId, status: "in_progress", rawInput: input(a.toolInput), ...(locations && { locations }), ...(diffs.length && { content: diffs }) });
+                const seen = a._meta?.acp;
+                const own = shown(f.tools.get(a.toolCallId), input(a.toolInput), cwd);
+                const locations = seen?.locations ?? own.locations;
+                const content = seen?.content ?? own.diffs;
+                // Waiting for a client's yes: this client is asked too.
+                if (!a.confirmed)
+                    void ask(f, sessionId, a.turnId, a.toolCallId, a);
+                else
+                    notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId, status: "in_progress", rawInput: input(a.toolInput), ...(locations && { locations }), ...(content.length && { content }) });
             }
-            else if (a.type === "chat/toolCallComplete")
-                notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId, status: a.result?.success === false ? "failed" : "completed", content: toolContent(a.result?.content) });
+            else if (a.type === "chat/toolCallConfirmed") {
+                // Answered (here or by another client): this client's question is off.
+                f.asks.get(a.toolCallId)?.abort();
+                if (a.approved)
+                    notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId, status: "in_progress" });
+            }
+            else if (a.type === "chat/toolCallComplete") {
+                const seen = a._meta?.acp;
+                notify(sessionId, { sessionUpdate: "tool_call_update", toolCallId: a.toolCallId, status: a.result?.success === false ? "failed" : "completed", content: seen?.content ?? toolContent(a.result?.content) });
+            }
+            else if (a.type === "chat/usage" && a.usage?._meta?.acp)
+                notify(sessionId, { sessionUpdate: "usage_update", used: a.usage._meta.acp.used, size: a.usage._meta.acp.size });
             else if (a.type === "chat/usage" && a.usage && opts.contextWindow)
                 notify(sessionId, { sessionUpdate: "usage_update", used: a.usage.inputTokens + (a.usage.cacheReadTokens ?? 0) + a.usage.outputTokens, size: opts.contextWindow });
             else if (a.type === "chat/turnComplete" && a.turnId)
@@ -162,6 +204,38 @@ export function acpFront(host, opts) {
             f.waiting.delete(turnId);
             w?.reject(acp.RequestError.internalError(undefined, why));
         }
+        // A tool call waiting for a yes, asked of this connection's client; its answer is the session's unless another
+        // client's came first (the host refuses a second), and the question is withdrawn once anyone answers.
+        async function ask(f, sessionId, turnId, toolCallId, a) {
+            if (!client || f.asks.has(toolCallId))
+                return;
+            const seen = a._meta?.acp;
+            const options = seen?.options ?? (a.options ? a.options.map((o) => ({ optionId: o.id, name: o.label, kind: o.kind === "approve" ? "allow_once" : "reject_once" })) : ANSWERS);
+            const own = shown(f.tools.get(toolCallId), input(a.toolInput), cwd);
+            const abort = new AbortController();
+            f.asks.set(toolCallId, abort);
+            try {
+                const { outcome } = await client.request(acp.methods.client.session.requestPermission, {
+                    sessionId,
+                    toolCall: { toolCallId, title: plain(a.invocationMessage) || a.toolName || "tool", kind: seen?.kind ?? own.kind, status: "pending", rawInput: input(a.toolInput), ...((seen?.locations ?? own.locations) && { locations: seen?.locations ?? own.locations }), ...((seen?.content ?? own.diffs).length && { content: seen?.content ?? own.diffs }) },
+                    options,
+                }, { cancellationSignal: abort.signal });
+                if (abort.signal.aborted || outcome.outcome !== "selected")
+                    return;
+                const chosen = options.find((o) => o.optionId === outcome.optionId);
+                if (!chosen)
+                    return;
+                const approved = chosen.kind.startsWith("allow");
+                const picked = seen?.options || a.options ? { selectedOptionId: chosen.optionId } : {};
+                await dispatch(sessionId, approved ? { type: "chat/toolCallConfirmed", turnId, toolCallId, approved: true, confirmed: "user-action", ...picked } : { type: "chat/toolCallConfirmed", turnId, toolCallId, approved: false, reason: "denied", ...picked });
+            }
+            catch {
+                // The client went, or the question was withdrawn.
+            }
+            finally {
+                f.asks.delete(toolCallId);
+            }
+        }
         // What a prompt says: its text, and its links (every agent takes resource links) and embedded text as text.
         const said = (prompt) => prompt
             .flatMap((b) => b.type === "text"
@@ -182,7 +256,7 @@ export function acpFront(host, opts) {
             // Its session's too, for titles.
             await ahp.request("subscribe", { channel: `${SESSION}${sessionId.split("/")[0]}` }).catch(() => { });
             if (!followed.has(sessionId))
-                followed.set(sessionId, { turn: snapshot?.state.activeTurn?.id, own: new Set(), waiting: new Map(), queued: new Map(), steers: new Set(), tools: new Map() });
+                followed.set(sessionId, { turn: snapshot?.state.activeTurn?.id, own: new Set(), waiting: new Map(), queued: new Map(), steers: new Set(), tools: new Map(), asks: new Map() });
             return snapshot?.state;
         }
         const sessionsOf = async () => {
@@ -204,8 +278,7 @@ export function acpFront(host, opts) {
             .onRequest(acp.methods.agent.initialize, () => ({
             protocolVersion: acp.PROTOCOL_VERSION,
             agentInfo: opts.info,
-            // TODO: permission prompts (session/request_permission, bridged to AHP's tool calls waiting for confirmation;
-            // the first answer wins), and subagents as ACP's Subagents RFD has them (subagent_update, for clients that ask).
+            // TODO: subagents as ACP's Subagents RFD has them (subagent_update, for clients that ask).
             agentCapabilities: {
                 loadSession: true,
                 sessionCapabilities: { list: {}, resume: {}, close: {}, delete: {} },

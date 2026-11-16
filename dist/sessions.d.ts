@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 import type { Context } from "@earendil-works/chord/context";
 import { type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import { type WebSocket } from "ws";
+import { type AcpProvider } from "./acp-chat.ts";
 import { AhpHost } from "./host.ts";
 export interface Chat {
     key: string;
@@ -19,13 +20,16 @@ export interface DurableAhpOptions {
         name: string;
         version: string;
     };
-    agent: {
+    agent?: {
         provider: string;
         displayName: string;
         description?: string;
         models?: unknown[];
     };
-    create?(session: string): Promise<Conversation>;
+    providers?: AcpProvider[];
+    create?(session: string, given: {
+        workingDirectory?: string;
+    }): Promise<Conversation>;
     opened?(session: string, conversation: Conversation): void;
     title?(session: string): string | undefined;
     meta?(session: string): Record<string, unknown> | undefined;
@@ -49,7 +53,8 @@ export declare function durableAhp(opts: DurableAhpOptions): {
         stdio: () => import("@agentclientprotocol/sdk").AgentConnection;
     };
     conversation: (session: string) => Promise<Conversation>;
-    catalogue: () => Promise<{
+    catalogue: () => Promise<({
+        workingDirectories: string[];
         resource: string;
         provider: string;
         title: string;
@@ -68,7 +73,27 @@ export declare function durableAhp(opts: DurableAhpOptions): {
             _meta?: Record<string, unknown> | undefined;
         }[];
         _meta?: Record<string, unknown> | undefined;
-    }[]>;
+    } | {
+        workingDirectories?: undefined;
+        resource: string;
+        provider: string;
+        title: string;
+        status: number;
+        createdAt: string;
+        modifiedAt: string;
+        defaultChat: string;
+        chats: {
+            resource: string;
+            title: string;
+            status: number;
+            modifiedAt: string;
+            origin: {
+                kind: string;
+            };
+            _meta?: Record<string, unknown> | undefined;
+        }[];
+        _meta?: Record<string, unknown> | undefined;
+    })[]>;
     adopt(session: string, id: ConversationId, known?: {
         title?: string;
         created?: string;
@@ -76,6 +101,7 @@ export declare function durableAhp(opts: DurableAhpOptions): {
     }): Promise<boolean>;
     changed: (session: string) => Promise<void>;
     reset(): void;
+    close(): void;
     accept: (ws: WebSocket) => void;
     upgrade: (req: IncomingMessage, socket: Duplex, head: Buffer) => void;
 };

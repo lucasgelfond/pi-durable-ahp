@@ -1,31 +1,45 @@
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { defineDoc } from "@earendil-works/pi-durable";
 import { WebSocketServer } from "ws";
 import { chatState, DurableChat } from "./chat.js";
+import { AcpChat } from "./acp-chat.js";
 import { acpFront } from "./acp.js";
 import { AhpHost, ROOT } from "./host.js";
 // pi-durable conversations as AHP sessions: ahp-session:/<id>, whose default chat (ahp-chat:/<id>) is the
 // conversation, opened when a client first looks. A session's other chats (ahp-chat:/<id>/<key>: its subagents, say)
 // are the caller's to list (`chats`), each with its own conversation's turns if it has one. A session is titled by
-// the first message in it; its creator's _meta (createSession's) is kept with it.
+// the first message in it; its creator's _meta (createSession's) is kept with it. A session may instead be an ACP
+// agent's (createSession's `provider`, one of `providers`): its chat is that agent's session (acp-chat.ts), in the
+// session's working directory, and the catalogue keeps which agent and its session id.
 const SESSION = "ahp-session:/";
 const CHAT = "ahp-chat:/";
 // AHP's statuses: idle, and working.
 const IDLE = 1;
 const WORKING = 8;
-// Which conversation each session is, its title, when it was made, and its creator's _meta (as JSON).
+const empty = () => ({ ids: {}, titles: {}, created: {}, meta: {}, providers: {}, acp: {}, dirs: {} });
 const Sessions = defineDoc({
     kind: "pi-durable-ahp.sessions",
     version: 1,
     scope: "session",
-    initial: () => ({ ids: {}, titles: {}, created: {}, meta: {} }),
+    initial: empty,
     checkpointWhen: () => true,
 });
 export function durableAhp(opts) {
     const ctx = opts.context;
     const named = opts.named ?? ((id) => id);
     const harness = () => opts.harness();
-    const read = async () => ({ ids: {}, titles: {}, created: {}, meta: {}, ...((await harness().snapshot(Sessions, ctx)) ?? {}) });
-    const update = (change) => harness().commit(async (tx) => change((await tx.doc(Sessions))), ctx);
+    const read = async () => ({ ...empty(), ...((await harness().snapshot(Sessions, ctx)) ?? {}) });
+    // A catalogue kept before it had a field gets it.
+    const update = (change) => harness().commit(async (tx) => {
+        const d = (await tx.doc(Sessions));
+        for (const [k, v] of Object.entries(empty()))
+            d[k] ??= v;
+        change(d);
+    }, ctx);
+    // An ACP agent's session's agent; undefined for a pi-durable conversation's.
+    const providerOf = (session, doc) => (doc.providers[session] ? opts.providers?.find((p) => p.id === doc.providers[session]) : undefined);
+    const providerName = (session, doc) => doc.providers[session] ?? opts.agent?.provider ?? "";
+    const dirsOf = (session, doc) => (doc.dirs[session] ? { workingDirectories: [pathToFileURL(doc.dirs[session]).href] } : {});
     const sessionOf = (uri) => (uri.startsWith(SESSION) ? uri.slice(SESSION.length) : uri.startsWith(CHAT) ? uri.slice(CHAT.length).split("/")[0] : undefined);
     const keyOf = (uri) => (uri.startsWith(CHAT) ? uri.slice(CHAT.length).split("/")[1] : undefined);
     const chatUri = (session, key) => `${CHAT}${session}${key === undefined ? "" : `/${key}`}`;
@@ -57,9 +71,14 @@ export function durableAhp(opts) {
             return found;
         found = (async () => {
             const doc = await read();
+            if (providerOf(session, doc))
+                throw new Error(`${session} is ${doc.providers[session]}'s session, not a conversation of this host's`);
             let handle = doc.ids[session] ? await harness().conversation(Number(doc.ids[session]), ctx) : undefined;
             if (!handle) {
-                handle = opts.create ? await opts.create(session) : await harness().createConversation({ ownership: { kind: "ownerless" } }, ctx);
+                const cwd = doc.dirs[session];
+                handle = opts.create
+                    ? await opts.create(session, { ...(cwd && { workingDirectory: cwd }) })
+                    : await harness().createConversation({ ownership: { kind: "ownerless" }, ...(cwd && { agent: { cwd } }) }, ctx);
                 const id = String(handle.id);
                 await update((d) => {
                     d.ids[session] = id;
@@ -83,7 +102,8 @@ export function durableAhp(opts) {
             const meta = metaOf(session, doc);
             return {
                 resource: `${SESSION}${session}`,
-                provider: opts.agent.provider,
+                provider: providerName(session, doc),
+                ...dirsOf(session, doc),
                 title: titleOf(session, doc),
                 status: own?.status ?? IDLE,
                 createdAt: made,
@@ -125,16 +145,39 @@ export function durableAhp(opts) {
         await chat.open(title, meta);
     }
     const conversationOf = async (c) => (c.conversation === undefined ? undefined : await harness().conversation(c.conversation, ctx));
+    // An ACP agent's session's chat: the agent's process, started when it's needed.
+    function openAgent(session, provider, doc) {
+        const uri = chatUri(session);
+        if (chats.has(uri))
+            return;
+        const chat = new AcpChat({
+            host,
+            uri,
+            provider,
+            cwd: doc.dirs[session] ?? process.cwd(),
+            session: doc.acp[session] || undefined,
+            onStatus: statusChanged(session, uri),
+            onSession: (id) => update((d) => void (d.acp[session] = id)).then(() => { }),
+            onTitle: (t) => void retitle(session, uri, t).catch(quiet),
+        });
+        chats.set(uri, chat);
+        chat.open(titleOf(session, doc));
+    }
     async function openSession(session) {
         const uri = `${SESSION}${session}`;
         if (host.has(uri))
             return;
-        const handle = await conversation(session);
+        const before = await read();
+        const provider = providerOf(session, before);
+        const handle = provider ? undefined : await conversation(session);
         const doc = await read();
         const title = titleOf(session, doc);
         const meta = metaOf(session, doc);
-        host.create(uri, { provider: opts.agent.provider, title, status: IDLE, lifecycle: "ready", activeClients: [], chats: [], ...(meta && { _meta: meta }) });
-        await openChat(session, chatUri(session), title, handle);
+        host.create(uri, { provider: providerName(session, doc), ...dirsOf(session, doc), title, status: IDLE, lifecycle: "ready", activeClients: [], chats: [], ...(meta && { _meta: meta }) });
+        if (provider)
+            openAgent(session, provider, doc);
+        else
+            await openChat(session, chatUri(session), title, handle);
         host.dispatch(uri, act({ type: "session/chatAdded", summary: { resource: chatUri(session), title, status: IDLE, modifiedAt: new Date().toISOString(), origin: { kind: "user" } } }));
         host.dispatch(uri, act({ type: "session/defaultChatChanged", defaultChat: chatUri(session) }));
         const others = new Map((opts.chats?.(session) ?? []).map((c) => [c.key, c]));
@@ -200,23 +243,44 @@ export function durableAhp(opts) {
             const session = sessionOf(String(params.channel));
             if (!session || keyOf(String(params.channel)) !== undefined)
                 throw new Error("a session's channel is ahp-session:/<id>");
-            if (params._meta !== undefined)
-                await update((d) => void (d.meta[session] = JSON.stringify(params._meta)));
-            await conversation(session);
+            const asked = params.provider === undefined || params.provider === opts.agent?.provider ? undefined : String(params.provider);
+            const provider = asked === undefined ? undefined : opts.providers?.find((p) => p.id === asked);
+            if (asked !== undefined && !provider)
+                throw new Error(`no agent ${asked} here: ${[opts.agent?.provider, ...(opts.providers ?? []).map((p) => p.id)].filter(Boolean).join(", ")}`);
+            if (!provider && !opts.agent)
+                throw new Error(`pick an agent (provider): ${(opts.providers ?? []).map((p) => p.id).join(", ")}`);
+            const dir = params.workingDirectories?.[0];
+            const cwd = dir?.startsWith("file:") ? fileURLToPath(dir) : dir;
+            await update((d) => {
+                if (params._meta !== undefined)
+                    d.meta[session] = JSON.stringify(params._meta);
+                if (cwd)
+                    d.dirs[session] = cwd;
+                if (!provider || session in d.ids)
+                    return;
+                d.ids[session] = "";
+                d.providers[session] = provider.id;
+                d.created[session] = new Date().toISOString();
+            });
+            if (!provider)
+                await conversation(session);
             await openSession(session);
             const all = await catalogue();
             host.notify(ROOT, "root/sessionAdded", { summary: all.find((s) => s.resource === params.channel) });
         },
         async disposeSession(uri) {
             const session = sessionOf(uri);
-            if (!session || !(session in (await read()).ids))
+            const doc = await read();
+            if (!session || !(session in doc.ids))
                 throw new Error(`no session ${uri}`);
-            await (await conversation(session)).abort(ctx).catch(() => { });
+            const own = chats.get(chatUri(session));
+            if (own instanceof AcpChat)
+                own.stop();
+            else
+                await (await conversation(session)).abort(ctx).catch(() => { });
             await update((d) => {
-                delete d.ids[session];
-                delete d.titles[session];
-                delete d.created[session];
-                delete d.meta[session];
+                for (const field of [d.ids, d.titles, d.created, d.meta, d.providers, d.acp, d.dirs])
+                    delete field[session];
             });
             conversations.delete(session);
             for (const open of [...chats.keys()])
@@ -238,6 +302,12 @@ export function durableAhp(opts) {
             await opts.dispose(session, key);
         },
         validate(channel, action) {
+            // An answer to a tool call waiting for one: the first is taken, any after it refused.
+            if (action.type === "chat/toolCallConfirmed") {
+                const chat = chats.get(channel);
+                const a = action;
+                return chat instanceof AcpChat ? chat.answerable(a.turnId, a.toolCallId, a.approved, a.selectedOptionId) : "no tool call here waits for an answer";
+            }
             if (action.type !== "chat/turnStarted")
                 return undefined;
             const chat = chats.get(channel);
@@ -277,16 +347,29 @@ export function durableAhp(opts) {
                 else
                     void chat?.cancel().catch(quiet);
             }
+            if (a.type === "chat/toolCallConfirmed" && chat instanceof AcpChat) {
+                const c = action;
+                chat.answered(c.toolCallId, c.approved, c.selectedOptionId);
+            }
         },
         methods: opts.methods,
     }, opts.info);
-    host.create(ROOT, { agents: [{ models: [], ...opts.agent }] });
-    // A session is titled by the first message in it.
+    host.create(ROOT, {
+        agents: [
+            ...(opts.agent ? [{ models: [], ...opts.agent }] : []),
+            ...(opts.providers ?? []).map((p) => ({ provider: p.id, displayName: p.displayName, description: p.description ?? "", models: [] })),
+        ],
+    });
+    // A session is titled by the first message in it, or as its agent names it.
     async function title(session, channel, text) {
         const doc = await read();
         if (doc.titles[session] || opts.title?.(session) !== undefined)
             return;
-        const t = text.split("\n")[0].slice(0, 80);
+        await retitle(session, channel, text.split("\n")[0].slice(0, 80));
+    }
+    async function retitle(session, channel, t) {
+        if (opts.title?.(session) !== undefined || (await read()).titles[session] === t)
+            return;
         await update((d) => void (d.titles[session] = t));
         host.dispatch(`${SESSION}${session}`, act({ type: "session/titleChanged", title: t }));
         host.dispatch(`${SESSION}${session}`, act({ type: "session/chatUpdated", chat: channel, changes: { title: t } }));
@@ -304,10 +387,10 @@ export function durableAhp(opts) {
         // A conversation made before this host kept the catalogue (another host's, say) as a session, with what's known
         // of it; false for a session that's known already.
         async adopt(session, id, known = {}) {
-            if ((await read()).ids[session])
+            if (session in (await read()).ids)
                 return false;
             await update((d) => {
-                if (d.ids[session])
+                if (session in d.ids)
                     return;
                 d.ids[session] = String(id);
                 d.created[session] = known.created ?? new Date().toISOString();
@@ -323,12 +406,18 @@ export function durableAhp(opts) {
         // The Harness was opened again (after a storage failure): sessions and chats are found afresh when next asked for.
         reset() {
             conversations.clear();
-            for (const uri of chats.keys())
-                host.delete(uri);
+            for (const [uri, chat] of chats)
+                (chat instanceof AcpChat && chat.stop(), host.delete(uri));
             chats.clear();
             for (const session of shown.keys())
                 (host.delete(chatUri(session)), host.delete(`${SESSION}${session}`));
             shown.clear();
+        },
+        // Every ACP agent's process stopped, as the host closes.
+        close() {
+            for (const chat of chats.values())
+                if (chat instanceof AcpChat)
+                    chat.stop();
         },
         // A client on its WebSocket.
         accept: (ws) => host.accept(ws),

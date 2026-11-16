@@ -7,7 +7,7 @@ import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage } f
 import { type ActionEnvelope, chatReducer, PROTOCOL_VERSION, type URI } from "@microsoft/agent-host-protocol";
 import { AhpClient, type AhpTransport, type TransportFrame } from "@microsoft/agent-host-protocol/client";
 import WebSocket from "ws";
-import { type Chat, durableAhp } from "../src/index.ts";
+import { type AcpProvider, type Chat, durableAhp } from "../src/index.ts";
 
 // A Harness with a scripted model, served over AHP (/ahp) and ACP (/acp, Streamable HTTP and WebSocket) as an app
 // would: "remember X" calls the remember tool, "edit FILE" the edit tool, "slow …" answers at length (a turn that
@@ -58,8 +58,17 @@ export const model = { provider: "faux", modelId: "faux-1" };
 // The app's subagents: each session's, as chats beside it.
 export const subagents = new Map<string, Chat[]>();
 
-// `refuse`: subagents refuse what clients send them (as a task that has ended would).
-export function serve(opts: { methods?: Record<string, (params: Record<string, unknown>) => Promise<unknown>>; refuse?: boolean } = {}) {
+// The scripted ACP agent (acp-agent.ts) as a provider, its sessions kept in `state`; `noLoad`: one that can't load them.
+export const scripted = (state: string, opts: { id?: string; noLoad?: boolean } = {}): AcpProvider => ({
+  id: opts.id ?? "scripted",
+  displayName: "Scripted",
+  command: process.execPath,
+  args: [new URL("./acp-agent.ts", import.meta.url).pathname],
+  env: { AGENT_STATE: state, ...(opts.noLoad && { NO_LOAD: "1" }) },
+});
+
+// `refuse`: subagents refuse what clients send them (as a task that has ended would). `providers`: ACP agents.
+export function serve(opts: { methods?: Record<string, (params: Record<string, unknown>) => Promise<unknown>>; refuse?: boolean; providers?: AcpProvider[] } = {}) {
   const ahp = durableAhp({
     harness: () => harness,
     context: ctx,
@@ -70,6 +79,7 @@ export function serve(opts: { methods?: Record<string, (params: Record<string, u
     chats: (session) => subagents.get(session) ?? [],
     ...(opts.refuse && { send: async () => "not taking messages" }),
     methods: opts.methods,
+    providers: opts.providers,
   });
   const acp = ahp.acp({ cwd: "/work", contextWindow: 100_000 });
   const server = createServer((req, res) => (req.url?.startsWith("/acp") ? acp.http(req, res) : res.writeHead(404).end()));
@@ -77,7 +87,7 @@ export function serve(opts: { methods?: Record<string, (params: Record<string, u
   return new Promise<{ ahp: typeof ahp; url: string; port: number; close: () => void }>((resolve) =>
     server.listen(0, "127.0.0.1", () => {
       const port = (server.address() as AddressInfo).port;
-      resolve({ ahp, url: `ws://127.0.0.1:${port}`, port, close: () => (server.closeAllConnections(), server.close()) });
+      resolve({ ahp, url: `ws://127.0.0.1:${port}`, port, close: () => (ahp.close(), server.closeAllConnections(), server.close()) });
     }),
   );
 }
