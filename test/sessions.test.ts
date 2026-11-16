@@ -142,3 +142,32 @@ test("a conversation from before the catalogue is adopted as a session: listed w
   close();
 });
 
+test("committed: each conversation's entries as they're committed, once each, from the chat's own watch, even with no client looking", async () => {
+  const seen: { session: string; texts: string[]; key?: string }[] = [];
+  const textOf = (e: { model?: readonly { content: unknown }[] }) => JSON.stringify(e.model?.[0]?.content ?? "");
+  const before = await harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model } }, ctx);
+  await before.submit({ type: "input", content: "said before it was opened" }, ctx);
+  // Answered, so nothing of it is still to come.
+  while (!(await before.context(ctx)).messages.some((m) => m.role === "assistant")) await new Promise((r) => setTimeout(r, 20));
+  const { ahp, url, close } = await serve({ committed: (session, entries, key) => void seen.push({ session, texts: entries.map(textOf), ...(key !== undefined && { key }) }) });
+  await ahp.adopt("watched", before.id);
+  // Known to the host, with no client subscribed: its entries are reported as they come.
+  const handle = await ahp.conversation("watched");
+  await until(() => ahp.host.has("ahp-chat:/watched"));
+  await handle.submit({ type: "input", content: "remember the moon is round" }, ctx);
+  await until(() => seen.some((s) => s.texts.some((t) => t.includes("saved"))));
+  const all = seen.filter((s) => s.session === "watched").flatMap((s) => s.texts);
+  expect(all.some((t) => t.includes("remember the moon is round"))).toBe(true);
+  expect(all.some((t) => t.includes("said before it was opened"))).toBe(false);
+  // Each entry once, though a client now follows the same chat.
+  const { c, ws } = await client(url);
+  const chat = await follow(c, "ahp-chat:/watched");
+  c.dispatch("ahp-chat:/watched", { type: "chat/turnStarted", turnId: "t-committed", startedAt: new Date().toISOString(), message: { text: "and once more", origin: { kind: "user" } } } as never);
+  await until(completed(chat));
+  const once = seen.filter((s) => s.session === "watched").flatMap((s) => s.texts).filter((t) => t === JSON.stringify("and once more"));
+  expect(once).toHaveLength(1);
+  expect(seen.every((s) => s.key === undefined)).toBe(true);
+  ws.close();
+  close();
+});
+

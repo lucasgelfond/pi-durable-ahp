@@ -5,7 +5,7 @@ import type { Context } from "@earendil-works/chord/context";
 import { type Conversation, type ConversationId, defineDoc, type Harness } from "@earendil-works/pi-durable";
 import type { StateAction, URI } from "@microsoft/agent-host-protocol";
 import { type WebSocket, WebSocketServer } from "ws";
-import { chatState, DurableChat } from "./chat.ts";
+import { chatState, DurableChat, type Entry } from "./chat.ts";
 import { AcpChat, type AcpProvider } from "./acp-chat.ts";
 import { acpFront } from "./acp.ts";
 import { AhpHost, ROOT } from "./host.ts";
@@ -86,6 +86,10 @@ export interface DurableAhpOptions {
   said?(text: string): string;
   // Methods of the caller's own (x-<name>/…).
   methods?: Record<string, (params: Record<string, unknown>, clientId: string) => Promise<unknown>>;
+  // Each conversation's entries as they're committed (not those it had when it was opened; `key`: one of a session's
+  // other chats', undefined for the session's own), from the watch its chat runs anyway. With it, a session's chat is
+  // opened as soon as its conversation is known, not only once a client looks, so none of its entries go unseen.
+  committed?(session: string, entries: readonly Entry[], key?: string): void;
   // TODO: hooks for the caller's crons as AHP automations and its skills as AHP customizations (it keeps the stores).
   // TODO: subagent chats whose origin is the tool call that started them ({kind: "tool", chat, toolCallId}).
 }
@@ -155,6 +159,8 @@ export function durableAhp(opts: DurableAhpOptions) {
     })();
     conversations.set(session, found);
     found.catch(() => conversations.delete(session));
+    // Its chat (and so its watch) open from now on, for `committed`.
+    if (opts.committed) void found.then(() => openSession(session)).catch(quiet);
     return found;
   }
 
@@ -202,7 +208,8 @@ export function durableAhp(opts: DurableAhpOptions) {
       const refused = await opts.send!(session, key, text);
       if (refused) chat.refused(turnId, refused);
     } : undefined;
-    const chat = new DurableChat({ host, harness: harness(), conversation: handle, uri, ctx, onStatus: statusChanged(session, uri), named, send, input: opts.input, said: opts.said });
+    const committed = opts.committed && ((entries: readonly Entry[]) => opts.committed!(session, entries, key));
+    const chat = new DurableChat({ host, harness: harness(), conversation: handle, uri, ctx, onStatus: statusChanged(session, uri), named, send, input: opts.input, said: opts.said, committed });
     chats.set(uri, chat);
     await chat.open(title, meta);
   }

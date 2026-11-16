@@ -7,7 +7,7 @@ import { createRegistry, defineExtension, defineTool, Harness, MemoryStorage } f
 import { type ActionEnvelope, chatReducer, PROTOCOL_VERSION, type URI } from "@microsoft/agent-host-protocol";
 import { AhpClient, type AhpTransport, type TransportFrame } from "@microsoft/agent-host-protocol/client";
 import WebSocket from "ws";
-import { type AcpProvider, type Chat, durableAhp } from "../src/index.ts";
+import { type AcpProvider, type Chat, type DurableAhpOptions, durableAhp } from "../src/index.ts";
 
 // A Harness with a scripted model, served over AHP (/ahp) and ACP (/acp, Streamable HTTP and WebSocket) as an app
 // would: "remember X" calls the remember tool, "edit FILE" the edit tool, "slow …" answers at length (a turn that
@@ -68,7 +68,7 @@ export const scripted = (state: string, opts: { id?: string; noLoad?: boolean } 
 });
 
 // `refuse`: subagents refuse what clients send them (as a task that has ended would). `providers`: ACP agents.
-export function serve(opts: { methods?: Record<string, (params: Record<string, unknown>) => Promise<unknown>>; refuse?: boolean; providers?: AcpProvider[] } = {}) {
+export function serve(opts: { methods?: Record<string, (params: Record<string, unknown>) => Promise<unknown>>; refuse?: boolean; providers?: AcpProvider[]; committed?: DurableAhpOptions["committed"] } = {}) {
   const ahp = durableAhp({
     harness: () => harness,
     context: ctx,
@@ -80,6 +80,7 @@ export function serve(opts: { methods?: Record<string, (params: Record<string, u
     ...(opts.refuse && { send: async () => "not taking messages" }),
     methods: opts.methods,
     providers: opts.providers,
+    committed: opts.committed,
   });
   const acp = ahp.acp({ cwd: "/work", contextWindow: 100_000 });
   const server = createServer((req, res) => (req.url?.startsWith("/acp") ? acp.http(req, res) : res.writeHead(404).end()));

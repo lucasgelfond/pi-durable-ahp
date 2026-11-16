@@ -10,7 +10,7 @@ import type { AhpHost } from "./host.ts";
 
 type Part = { type: string; text?: string; id?: string; name?: string; arguments?: unknown };
 type Message = { role: string; content: string | Part[]; model?: string; usage?: { input: number; output: number; cacheRead?: number }; toolCallId?: string; toolName?: string; isError?: boolean };
-type Entry = { id: unknown; kind: string; data?: { origin?: string }; model?: readonly Message[] };
+export type Entry = { id: unknown; kind: string; data?: { origin?: string }; model?: readonly Message[] };
 
 // An input from someone other than the user (AHP's message kinds: "agent", "systemNotification", …), as the entry it's
 // placed as, so the chat shows who it's from: pass it with the input (`conversation.submit({ …, ...inputFrom(kind) })`).
@@ -84,6 +84,8 @@ export class DurableChat {
   // A client's message as the conversation's input (a time stamp added, say), and an input as the chat shows it.
   readonly input: (text: string) => string;
   readonly said: (text: string) => string;
+  // The conversation's entries as they're committed (not those it had when the chat opened).
+  readonly committed?: (entries: readonly Entry[]) => void;
   constructor(opts: {
     host: AhpHost;
     harness: Harness;
@@ -95,6 +97,7 @@ export class DurableChat {
     send?: (text: string, turnId: string) => Promise<void>;
     input?: (text: string) => string;
     said?: (text: string) => string;
+    committed?: (entries: readonly Entry[]) => void;
   }) {
     this.host = opts.host;
     this.harness = opts.harness;
@@ -106,6 +109,7 @@ export class DurableChat {
     this.send = opts.send;
     this.input = opts.input ?? ((text) => text);
     this.said = opts.said ?? ((text) => text);
+    this.committed = opts.committed;
   }
 
   get running() {
@@ -124,7 +128,9 @@ export class DurableChat {
     watch.start(async (call) => {
       if (call.kind !== "value") return;
       const value = call.value as unknown as { entries: Entry[]; docs: Record<string, { run?: unknown; runFailure?: { reason: string; detail?: string } } | undefined> };
-      for (const e of value.entries) if (!this.#seen.has(String(e.id))) (this.#seen.add(String(e.id)), this.#entry(e));
+      const fresh = value.entries.filter((e) => !this.#seen.has(String(e.id)));
+      for (const e of fresh) (this.#seen.add(String(e.id)), this.#entry(e));
+      if (fresh.length) this.committed?.(fresh);
       const live = value.docs["pi.live"];
       const running = live?.run !== undefined;
       if (this.#running && !running) this.#end(live?.runFailure);

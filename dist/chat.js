@@ -71,6 +71,8 @@ export class DurableChat {
     // A client's message as the conversation's input (a time stamp added, say), and an input as the chat shows it.
     input;
     said;
+    // The conversation's entries as they're committed (not those it had when the chat opened).
+    committed;
     constructor(opts) {
         this.host = opts.host;
         this.harness = opts.harness;
@@ -82,6 +84,7 @@ export class DurableChat {
         this.send = opts.send;
         this.input = opts.input ?? ((text) => text);
         this.said = opts.said ?? ((text) => text);
+        this.committed = opts.committed;
     }
     get running() {
         return this.#running || (this.#turn !== undefined && !this.#turn.placed);
@@ -103,9 +106,11 @@ export class DurableChat {
             if (call.kind !== "value")
                 return;
             const value = call.value;
-            for (const e of value.entries)
-                if (!this.#seen.has(String(e.id)))
-                    (this.#seen.add(String(e.id)), this.#entry(e));
+            const fresh = value.entries.filter((e) => !this.#seen.has(String(e.id)));
+            for (const e of fresh)
+                (this.#seen.add(String(e.id)), this.#entry(e));
+            if (fresh.length)
+                this.committed?.(fresh);
             const live = value.docs["pi.live"];
             const running = live?.run !== undefined;
             if (this.#running && !running)

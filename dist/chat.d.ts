@@ -2,6 +2,34 @@ import type { Context } from "@earendil-works/chord/context";
 import { type Conversation, type Harness } from "@earendil-works/pi-durable";
 import type { URI } from "@microsoft/agent-host-protocol";
 import type { AhpHost } from "./host.ts";
+type Part = {
+    type: string;
+    text?: string;
+    id?: string;
+    name?: string;
+    arguments?: unknown;
+};
+type Message = {
+    role: string;
+    content: string | Part[];
+    model?: string;
+    usage?: {
+        input: number;
+        output: number;
+        cacheRead?: number;
+    };
+    toolCallId?: string;
+    toolName?: string;
+    isError?: boolean;
+};
+export type Entry = {
+    id: unknown;
+    kind: string;
+    data?: {
+        origin?: string;
+    };
+    model?: readonly Message[];
+};
 export declare const inputFrom: (origin?: string) => {} | {
     entry: {
         kind: string;
@@ -33,6 +61,7 @@ export declare class DurableChat {
     readonly send?: (text: string, turnId: string) => Promise<void>;
     readonly input: (text: string) => string;
     readonly said: (text: string) => string;
+    readonly committed?: (entries: readonly Entry[]) => void;
     constructor(opts: {
         host: AhpHost;
         harness: Harness;
@@ -44,6 +73,7 @@ export declare class DurableChat {
         send?: (text: string, turnId: string) => Promise<void>;
         input?: (text: string) => string;
         said?: (text: string) => string;
+        committed?: (entries: readonly Entry[]) => void;
     });
     get running(): boolean;
     open(title: string, meta?: Record<string, unknown>): Promise<void>;
@@ -53,3 +83,4 @@ export declare class DurableChat {
     cancel(): Promise<void>;
     busy(): Promise<boolean>;
 }
+export {};

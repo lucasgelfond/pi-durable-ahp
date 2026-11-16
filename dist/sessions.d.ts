@@ -3,6 +3,7 @@ import type { Duplex } from "node:stream";
 import type { Context } from "@earendil-works/chord/context";
 import { type Conversation, type ConversationId, type Harness } from "@earendil-works/pi-durable";
 import { type WebSocket } from "ws";
+import { type Entry } from "./chat.ts";
 import { type AcpProvider } from "./acp-chat.ts";
 import { AhpHost } from "./host.ts";
 export interface Chat {
@@ -41,6 +42,7 @@ export interface DurableAhpOptions {
     input?(text: string): string;
     said?(text: string): string;
     methods?: Record<string, (params: Record<string, unknown>, clientId: string) => Promise<unknown>>;
+    committed?(session: string, entries: readonly Entry[], key?: string): void;
 }
 export declare function durableAhp(opts: DurableAhpOptions): {
     host: AhpHost;

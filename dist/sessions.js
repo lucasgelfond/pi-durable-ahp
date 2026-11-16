@@ -91,6 +91,9 @@ export function durableAhp(opts) {
         })();
         conversations.set(session, found);
         found.catch(() => conversations.delete(session));
+        // Its chat (and so its watch) open from now on, for `committed`.
+        if (opts.committed)
+            void found.then(() => openSession(session)).catch(quiet);
         return found;
     }
     // The catalogue: each session's summary, newest first.
@@ -140,7 +143,8 @@ export function durableAhp(opts) {
             if (refused)
                 chat.refused(turnId, refused);
         } : undefined;
-        const chat = new DurableChat({ host, harness: harness(), conversation: handle, uri, ctx, onStatus: statusChanged(session, uri), named, send, input: opts.input, said: opts.said });
+        const committed = opts.committed && ((entries) => opts.committed(session, entries, key));
+        const chat = new DurableChat({ host, harness: harness(), conversation: handle, uri, ctx, onStatus: statusChanged(session, uri), named, send, input: opts.input, said: opts.said, committed });
         chats.set(uri, chat);
         await chat.open(title, meta);
     }
