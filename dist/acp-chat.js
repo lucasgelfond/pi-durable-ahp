@@ -79,7 +79,7 @@ export class AcpChat {
             child.once("exit", () => this.#gone(child));
             const race = (p) => Promise.race([p, ended]);
             const { agent } = acp
-                .client({ name: "pi-durable-acp-ahp" })
+                .client({ name: "pi-durable-ahp" })
                 .onNotification(acp.methods.client.session.update, ({ params }) => this.#update(params))
                 .onRequest(acp.methods.client.session.requestPermission, ({ params }) => this.#ask(params))
                 .connect(acp.ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));

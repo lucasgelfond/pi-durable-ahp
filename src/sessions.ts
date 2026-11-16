@@ -7,7 +7,6 @@ import type { StateAction, URI } from "@microsoft/agent-host-protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { chatState, DurableChat, type Entry } from "./chat.ts";
 import { AcpChat, type AcpProvider } from "./acp-chat.ts";
-import { acpFront } from "./acp.ts";
 import { AhpHost, ROOT } from "./host.ts";
 
 // pi-durable conversations as AHP sessions: ahp-session:/<id>, whose default chat (ahp-chat:/<id>) is the
@@ -430,9 +429,6 @@ export function durableAhp(opts: DurableAhpOptions) {
   const sockets = new WebSocketServer({ noServer: true });
   return {
     host,
-    // The Agent Client Protocol over the same sessions (acp.ts).
-    // TODO: a pi-durable-acp-ahp/acp entry point instead, so a host without ACP doesn't load the ACP SDK.
-    acp: (acpOpts: { cwd?: string; contextWindow?: number } = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
     conversation,
     catalogue,
     // A conversation made before this host kept the catalogue (another host's, say) as a session, with what's known
@@ -471,4 +467,4 @@ export function durableAhp(opts: DurableAhpOptions) {
 
 const act = (action: object) => action as StateAction;
 // Updates for clients that can wait for the next change (the Harness reopening, say).
-const quiet = (err: unknown) => console.error(`pi-durable-acp-ahp: ${(err as Error).message ?? err}`);
+const quiet = (err: unknown) => console.error(`pi-durable-ahp: ${(err as Error).message ?? err}`);

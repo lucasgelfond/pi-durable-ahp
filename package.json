@@ -1,7 +1,7 @@
 {
-  "name": "pi-durable-acp-ahp",
+  "name": "pi-durable-ahp",
   "version": "0.1.0",
-  "description": "Agent Client Protocol and Agent Host Protocol for pi-durable: each conversation a session, its subagents chats beside it, ACP agents as sessions too, over either protocol",
+  "description": "The Agent Host Protocol for pi-durable: each conversation a session, its subagents chats beside it, and ACP agents (Claude Code, pi, Gemini CLI) as sessions too",
   "type": "module",
   "exports": {
     ".": {
@@ -39,6 +39,6 @@
     "vitest": "5.0.3"
   },
   "bin": {
-    "pi-durable-acp-ahp": "./dist/bin.js"
+    "pi-durable-ahp": "./dist/bin.js"
   }
 }

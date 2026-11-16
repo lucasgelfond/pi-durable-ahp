@@ -3,7 +3,6 @@ import { defineDoc } from "@earendil-works/pi-durable";
 import { WebSocketServer } from "ws";
 import { chatState, DurableChat } from "./chat.js";
 import { AcpChat } from "./acp-chat.js";
-import { acpFront } from "./acp.js";
 import { AhpHost, ROOT } from "./host.js";
 // pi-durable conversations as AHP sessions: ahp-session:/<id>, whose default chat (ahp-chat:/<id>) is the
 // conversation, opened when a client first looks. A session's other chats (ahp-chat:/<id>/<key>: its subagents, say)
@@ -394,9 +393,6 @@ export function durableAhp(opts) {
     const sockets = new WebSocketServer({ noServer: true });
     return {
         host,
-        // The Agent Client Protocol over the same sessions (acp.ts).
-        // TODO: a pi-durable-acp-ahp/acp entry point instead, so a host without ACP doesn't load the ACP SDK.
-        acp: (acpOpts = {}) => acpFront(host, { info: opts.info, ...acpOpts }),
         conversation,
         catalogue,
         // A conversation made before this host kept the catalogue (another host's, say) as a session, with what's known
@@ -442,4 +438,4 @@ export function durableAhp(opts) {
 }
 const act = (action) => action;
 // Updates for clients that can wait for the next change (the Harness reopening, say).
-const quiet = (err) => console.error(`pi-durable-acp-ahp: ${err.message ?? err}`);
+const quiet = (err) => console.error(`pi-durable-ahp: ${err.message ?? err}`);

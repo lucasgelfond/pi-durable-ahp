@@ -9,9 +9,9 @@ import { AhpClient, type AhpTransport, type TransportFrame } from "@microsoft/ag
 import WebSocket from "ws";
 import { type AcpProvider, type Chat, type DurableAhpOptions, durableAhp } from "../src/index.ts";
 
-// A Harness with a scripted model, served over AHP (/ahp) and ACP (/acp, Streamable HTTP and WebSocket) as an app
-// would: "remember X" calls the remember tool, "edit FILE" the edit tool, "slow …" answers at length (a turn that
-// takes a while), a tool's result is answered "saved", anything else is echoed.
+// A Harness with a scripted model, served over AHP (a WebSocket) as an app would: "remember X" calls the remember
+// tool, "edit FILE" the edit tool, "slow …" answers at length (a turn that takes a while), a tool's result is answered
+// "saved", anything else is echoed.
 
 export const ctx = BACKGROUND_CONTEXT;
 export const remembered: string[] = [];
@@ -82,9 +82,8 @@ export function serve(opts: { methods?: Record<string, (params: Record<string, u
     providers: opts.providers,
     committed: opts.committed,
   });
-  const acp = ahp.acp({ cwd: "/work", contextWindow: 100_000 });
-  const server = createServer((req, res) => (req.url?.startsWith("/acp") ? acp.http(req, res) : res.writeHead(404).end()));
-  server.on("upgrade", (req, socket, head) => (req.url?.startsWith("/acp") ? acp.upgrade(req, socket, head) : ahp.upgrade(req, socket, head)));
+  const server = createServer((_req, res) => res.writeHead(404).end());
+  server.on("upgrade", (req, socket, head) => ahp.upgrade(req, socket, head));
   return new Promise<{ ahp: typeof ahp; url: string; port: number; close: () => void }>((resolve) =>
     server.listen(0, "127.0.0.1", () => {
       const port = (server.address() as AddressInfo).port;

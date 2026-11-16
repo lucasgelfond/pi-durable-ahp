@@ -30,13 +30,6 @@ export declare class AhpHost {
     delete(uri: URI): void;
     dispatch(channel: URI, action: StateAction, origin?: ActionEnvelope["origin"]): void;
     notify(channel: URI, method: string, params: object): void;
-    local(onMessage: (message: {
-        method: string;
-        params: Record<string, unknown>;
-    }) => void): {
-        request<T = unknown>(method: string, params: object): Promise<T>;
-        close(): void;
-    };
     accept(socket: Socket): void;
 }
 export {};

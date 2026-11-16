@@ -16,11 +16,11 @@ import { durableAhp } from "./sessions.ts";
 
 // A host on this machine for a terminal's own agents: each session an ACP agent's (pi, Claude Code, Gemini CLI, …: the
 // config's `providers`), or pi-durable's own coding agent if the config names a model (`pi`, its key from the
-// environment as pi-ai finds it), the catalogue and pi's own sessions kept in SQLite. AHP at /ahp and ACP at /acp, on a
-// unix socket only its user can open, and on 127.0.0.1 if asked for a port: nothing listens beyond this machine. An
+// environment as pi-ai finds it), the catalogue and pi's own sessions kept in SQLite. AHP at /ahp, on a unix socket only its
+// user can open, and on 127.0.0.1 if asked for a port: nothing listens beyond this machine. An
 // agent's process is started (npx fetching it, the first time) only once one of its sessions is used.
 //
-//   pi-durable-acp-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
+//   pi-durable-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
 //
 // The config, JSON: { "providers": [{ "id", "displayName", "command", "args"?, "env"? }], "pi"?: { "provider", "modelId" } }.
 // Without one, the agents below.
@@ -63,7 +63,7 @@ const pi = config.pi;
 const ahp = durableAhp({
   harness: () => harness,
   context: ctx,
-  info: { name: "pi-durable-acp-ahp", version: "0" },
+  info: { name: "pi-durable-ahp", version: "0" },
   ...(pi && {
     agent: { provider: "pi-durable", displayName: "pi (durable)", description: `${pi.provider}/${pi.modelId}` },
     create: (_session, { workingDirectory }) =>
@@ -71,15 +71,9 @@ const ahp = durableAhp({
   }),
   providers: config.providers ?? DEFAULTS,
 });
-const acp = ahp.acp({ cwd: homedir() });
 
-const server = createServer((req, res) => (req.url?.startsWith("/acp") ? acp.http(req, res) : res.writeHead(404).end()));
-server.on("upgrade", (req, socket, head) => {
-  const path = new URL(req.url ?? "/", "http://host").pathname;
-  if (path === "/ahp") return ahp.upgrade(req, socket, head);
-  if (path === "/acp") return acp.upgrade(req, socket, head);
-  socket.destroy();
-});
+const server = createServer((_req, res) => res.writeHead(404).end());
+server.on("upgrade", (req, socket, head) => (new URL(req.url ?? "/", "http://host").pathname === "/ahp" ? ahp.upgrade(req, socket, head) : socket.destroy()));
 server.requestTimeout = 0;
 mkdirSync(dirname(args.socket!), { recursive: true });
 rmSync(args.socket!, { force: true });

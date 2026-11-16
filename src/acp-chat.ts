@@ -12,8 +12,8 @@ import type { AhpHost } from "./host.ts";
 // confirmation (the first answer wins). Its session id is the caller's to keep (`onSession`): a process started later
 // loads it (session/load replays what was said), or, for an agent that can't, starts afresh and says so. How updates
 // map follows ahp-acp-gateway (github.com/formulahendry/ahp-acp-gateway, MIT). ACP's own view of each tool call (its
-// kind, locations, content and diffs, and permission options) rides in the tool call's _meta.acp, for ACP clients of
-// this host (acp.ts) to see it as the agent said it.
+// kind, locations, content and diffs, and permission options) rides in the tool call's _meta.acp, for a client to see
+// it as the agent said it.
 
 export interface AcpProvider {
   id: string;
@@ -110,7 +110,7 @@ export class AcpChat {
       child.once("exit", () => this.#gone(child));
       const race = <T>(p: Promise<T>) => Promise.race([p, ended]);
       const { agent } = acp
-        .client({ name: "pi-durable-acp-ahp" })
+        .client({ name: "pi-durable-ahp" })
         .onNotification(acp.methods.client.session.update, ({ params }) => this.#update(params))
         .onRequest(acp.methods.client.session.requestPermission, ({ params }) => this.#ask(params))
         .connect(acp.ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>));

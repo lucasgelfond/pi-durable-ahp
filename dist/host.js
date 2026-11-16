@@ -1,5 +1,4 @@
 import { changesetReducer, chatReducer, PROTOCOL_VERSION, rootReducer, sessionReducer, terminalReducer, } from "@microsoft/agent-host-protocol";
-import { EventEmitter } from "node:events";
 // An Agent Host Protocol host (microsoft.github.io/agent-host-protocol): each channel's state, changed only by the
 // protocol's own reducers; each committed action numbered (serverSeq), sent to the channel's subscribers, and kept a
 // while, so a client that reconnects gets what it missed instead of starting over. What the channels mean is the
@@ -77,41 +76,6 @@ export class AhpHost {
         if (!this.#states.has(uri))
             await this.#handlers.hydrate?.(uri).catch(() => false);
         return this.#states.has(uri);
-    }
-    // A client in this process (another protocol's front, say), talking to the host as a WebSocket client would: its
-    // requests answered, and its channels' actions and notifications passed to `onMessage`.
-    local(onMessage) {
-        const events = new EventEmitter();
-        const waiting = new Map();
-        let open = true;
-        let n = 0;
-        this.accept({
-            get readyState() {
-                return open ? 1 : 3;
-            },
-            send(text) {
-                const message = JSON.parse(text);
-                const w = message.id !== undefined ? waiting.get(String(message.id)) : undefined;
-                if (w)
-                    return void (waiting.delete(String(message.id)), message.error ? w.reject(new Error(message.error.message)) : w.resolve(message.result));
-                if (message.method)
-                    onMessage(message);
-            },
-            on: (event, listener) => events.on(event, listener),
-        });
-        return {
-            request(method, params) {
-                const id = `local-${++n}`;
-                return new Promise((resolve, reject) => {
-                    waiting.set(id, { resolve: resolve, reject });
-                    events.emit("message", JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-                });
-            },
-            close() {
-                open = false;
-                events.emit("close");
-            },
-        };
     }
     accept(socket) {
         const client = { socket, subscriptions: new Set() };

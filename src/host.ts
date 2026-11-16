@@ -10,7 +10,6 @@ import {
   terminalReducer,
   type URI,
 } from "@microsoft/agent-host-protocol";
-import { EventEmitter } from "node:events";
 
 // An Agent Host Protocol host (microsoft.github.io/agent-host-protocol): each channel's state, changed only by the
 // protocol's own reducers; each committed action numbered (serverSeq), sent to the channel's subscribers, and kept a
@@ -124,40 +123,6 @@ export class AhpHost {
   async #channel(uri: URI) {
     if (!this.#states.has(uri)) await this.#handlers.hydrate?.(uri).catch(() => false);
     return this.#states.has(uri);
-  }
-
-  // A client in this process (another protocol's front, say), talking to the host as a WebSocket client would: its
-  // requests answered, and its channels' actions and notifications passed to `onMessage`.
-  local(onMessage: (message: { method: string; params: Record<string, unknown> }) => void) {
-    const events = new EventEmitter();
-    const waiting = new Map<string, { resolve: (result: unknown) => void; reject: (err: Error) => void }>();
-    let open = true;
-    let n = 0;
-    this.accept({
-      get readyState() {
-        return open ? 1 : 3;
-      },
-      send(text) {
-        const message = JSON.parse(text) as { id?: string; result?: unknown; error?: { message: string }; method?: string; params?: Record<string, unknown> };
-        const w = message.id !== undefined ? waiting.get(String(message.id)) : undefined;
-        if (w) return void (waiting.delete(String(message.id)), message.error ? w.reject(new Error(message.error.message)) : w.resolve(message.result));
-        if (message.method) onMessage(message as { method: string; params: Record<string, unknown> });
-      },
-      on: (event: string, listener: (...args: unknown[]) => void) => events.on(event, listener),
-    });
-    return {
-      request<T = unknown>(method: string, params: object) {
-        const id = `local-${++n}`;
-        return new Promise<T>((resolve, reject) => {
-          waiting.set(id, { resolve: resolve as (result: unknown) => void, reject });
-          events.emit("message", JSON.stringify({ jsonrpc: "2.0", id, method, params }));
-        });
-      },
-      close() {
-        open = false;
-        events.emit("close");
-      },
-    };
   }
 
   accept(socket: Socket) {

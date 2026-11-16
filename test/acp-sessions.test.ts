@@ -4,16 +4,14 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import * as acp from "@agentclientprotocol/sdk";
-import { createWebSocketStream } from "@agentclientprotocol/sdk/experimental/ws-client";
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
 import { expect, test } from "vitest";
 import { client, follow, scripted, serve, until } from "./support.ts";
 
 // Sessions backed by an ACP agent (the scripted one, acp-agent.ts, a process of its own per session), driven by
-// Microsoft's AHP client and by ACP clients through the front: a turn streams, an edit is a tool call with its diff, a
-// permission is asked of every client and the first answer wins, cancelling and steering reach the agent, a restarted
-// host loads the agent's session again, and the local host bin serves it all on a unix socket.
+// Microsoft's AHP client: a turn streams, an edit is a tool call with its diff, a permission is asked of every client
+// and the first answer wins, cancelling and steering reach the agent, a restarted host loads the agent's session again,
+// and the local host bin serves it all on a unix socket.
 
 const state = () => join(mkdtempSync(join(tmpdir(), "acp-agent-")), "sessions.json");
 // The sessions' working directory.
@@ -93,54 +91,6 @@ test("an agent's permission request is a tool call waiting for confirmation: the
   expect(said(chatA.state.turns[1].responseParts)).toBe("not allowed (no)");
   a.ws.close();
   b.ws.close();
-  close();
-});
-
-test("over the ACP front, an agent's permission request is asked of every ACP client following it: the first answer wins and the other's question is withdrawn", async () => {
-  const { port, url, close } = await serve({ providers: [scripted(state())] });
-  const ahpClient = await client(url);
-  const session = await agentSession(ahpClient);
-  const asked: string[] = [];
-  let withdrawn = false;
-  const updates: acp.SessionNotification[] = [];
-  // The slow one: waits until its question is withdrawn.
-  const slow = acp
-    .client({ name: "slow" })
-    .onRequest(acp.methods.client.session.requestPermission, async ({ params, signal }) => {
-      asked.push(`slow:${params.options.map((o) => o.kind).join(",")}`);
-      await new Promise((r) => signal.addEventListener("abort", r));
-      withdrawn = true;
-      return { outcome: { outcome: "cancelled" } };
-    })
-    .connectWith(createWebSocketStream(`ws://127.0.0.1:${port}/acp`), async (c) => {
-      await c.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
-      await c.request(acp.methods.agent.session.resume, { sessionId: session, cwd: "/", mcpServers: [] });
-      await until(() => withdrawn, 20_000);
-    });
-  await new Promise((r) => setTimeout(r, 200));
-  await acp
-    .client({ name: "quick" })
-    .onNotification(acp.methods.client.session.update, ({ params }) => void updates.push(params))
-    .onRequest(acp.methods.client.session.requestPermission, ({ params }) => {
-      asked.push(`quick:${params.toolCall.kind}`);
-      return { outcome: { outcome: "selected", optionId: "yes" } };
-    })
-    .connectWith(createWebSocketStream(`ws://127.0.0.1:${port}/acp`), async (c) => {
-      await c.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
-      await new Promise((r) => setTimeout(r, 200));
-      const { stopReason } = await c.request(acp.methods.agent.session.prompt, { sessionId: session, prompt: [{ type: "text", text: "ask notes.txt" }] });
-      expect(stopReason).toBe("end_turn");
-    });
-  await slow;
-  expect(asked).toContain("quick:edit");
-  expect(asked).toContain("slow:allow_once,allow_always,reject_once");
-  expect(withdrawn).toBe(true);
-  const text = updates.filter((u) => u.update.sessionUpdate === "agent_message_chunk").map((u) => (u.update as { content: { text: string } }).content.text).join("");
-  expect(text).toBe("edited, as yes");
-  // The edit's diff, as the agent gave it.
-  const done = updates.find((u) => u.update.sessionUpdate === "tool_call_update" && u.update.status === "completed")!.update as { content?: unknown[] };
-  expect(done.content).toEqual([{ type: "diff", path: "/work/notes.txt", oldText: "old line", newText: "new line" }]);
-  ahpClient.ws.close();
   close();
 });
 
