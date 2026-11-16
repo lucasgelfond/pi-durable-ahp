@@ -1,12 +1,13 @@
+import { spawn } from "node:child_process";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
-import { type Conversation, type ConversationId, defineDoc, type Harness } from "@earendil-works/pi-durable";
+import { type Conversation, type ConversationId, defineDoc, defineDocFamily, type Harness, type JsonObject } from "@earendil-works/pi-durable";
 import type { StateAction, URI } from "@microsoft/agent-host-protocol";
 import { type WebSocket, WebSocketServer } from "ws";
 import { chatState, DurableChat, type Entry } from "./chat.ts";
-import { AcpChat, type AcpProvider } from "./acp-chat.ts";
+import { AcpChat, type AcpProvider, type Shown } from "./acp-chat.ts";
 import { AhpHost, ROOT } from "./host.ts";
 
 // pi-durable conversations as AHP sessions: ahp-session:/<id>, whose default chat (ahp-chat:/<id>) is the
@@ -41,6 +42,16 @@ const Sessions = defineDoc<SessionsDoc>({
   scope: "session",
   initial: empty,
   checkpointWhen: () => true,
+});
+// An ACP agent's session's transcript: each finished turn as clients saw it, there when the agent isn't (a box asleep or
+// gone), and the ids of the agent's messages in them, so what it replays isn't shown twice.
+const Transcripts = defineDocFamily<{ turns: JsonObject[]; ids: string[] }, null>({
+  kind: "pi-durable-ahp.transcript",
+  version: 1,
+  scope: "session",
+  family: true,
+  initial: () => ({ turns: [], ids: [] }),
+  checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
 });
 
 // A chat of a session besides its own: its key in the session, and its conversation if it has one.
@@ -114,7 +125,8 @@ export function durableAhp(opts: DurableAhpOptions) {
   const chatUri = (session: string, key?: string): URI => `${CHAT}${session}${key === undefined ? "" : `/${key}`}`;
   const titleOf = (session: string, doc: SessionsDoc) => opts.title?.(session) ?? doc.titles[session] ?? "New session";
   const metaOf = (session: string, doc: SessionsDoc) => {
-    const own = opts.meta?.(session);
+    const agent = providerOf(session, doc)?.meta?.(session);
+    const own = agent || opts.meta ? { ...agent, ...opts.meta?.(session) } : undefined;
     const given = doc.meta[session] ? (JSON.parse(doc.meta[session]) as Record<string, unknown>) : undefined;
     if (!own && !given) return undefined;
     // Keyed objects merge one level deep, so a creator's {app: {source}} and the caller's {app: {model}} both stay.
@@ -214,23 +226,35 @@ export function durableAhp(opts: DurableAhpOptions) {
   }
   const conversationOf = async (c: Chat) => (c.conversation === undefined ? undefined : await harness().conversation(c.conversation, ctx));
 
-  // An ACP agent's session's chat: the agent's process, started when it's needed.
-  function openAgent(session: string, provider: AcpProvider, doc: SessionsDoc) {
+  // An ACP agent's session's chat: the agent's process, started when it's needed, and what it said before.
+  async function openAgent(session: string, provider: AcpProvider, doc: SessionsDoc) {
     const uri = chatUri(session);
+    if (chats.has(uri)) return;
+    const transcript = await harness().snapshot(Transcripts, session, ctx);
     if (chats.has(uri)) return;
     const chat = new AcpChat({
       host,
       uri,
+      key: session,
       provider,
       cwd: doc.dirs[session] ?? process.cwd(),
       session: doc.acp[session] || undefined,
+      transcript: transcript && JSON.parse(JSON.stringify(transcript)),
       onStatus: statusChanged(session, uri),
       onSession: (id) => update((d) => void (d.acp[session] = id)).then(() => {}),
       onTitle: (t) => void retitle(session, uri, t).catch(quiet),
+      onTurn: (turn, ids) => void keep(session, turn, ids).catch(quiet),
     });
     chats.set(uri, chat);
     chat.open(titleOf(session, doc));
   }
+  const keep = (session: string, turn: Shown, ids: string[]) =>
+    harness().commit(async (tx) => {
+      const t = await tx.doc(Transcripts, session, null);
+      const json: JsonObject = JSON.parse(JSON.stringify(turn));
+      t.turns.push(json);
+      t.ids.push(...ids);
+    }, ctx);
 
   // Opened once, however many ask at once (a client subscribing as `committed` opens it).
   const opening = new Map<string, Promise<void>>();
@@ -253,7 +277,7 @@ export function durableAhp(opts: DurableAhpOptions) {
     const title = titleOf(session, doc);
     const meta = metaOf(session, doc);
     host.create(uri, { provider: providerName(session, doc), ...dirsOf(session, doc), title, status: IDLE, lifecycle: "ready", activeClients: [], chats: [], ...(meta && { _meta: meta }) });
-    if (provider) openAgent(session, provider, doc);
+    if (provider) await openAgent(session, provider, doc);
     else await openChat(session, chatUri(session), title, handle);
     host.dispatch(uri, act({ type: "session/chatAdded", summary: { resource: chatUri(session), title, status: IDLE, modifiedAt: new Date().toISOString(), origin: { kind: "user" } } }));
     host.dispatch(uri, act({ type: "session/defaultChatChanged", defaultChat: chatUri(session) }));
@@ -339,8 +363,13 @@ export function durableAhp(opts: DurableAhpOptions) {
         const doc = await read();
         if (!session || !(session in doc.ids)) throw new Error(`no session ${uri}`);
         const own = chats.get(chatUri(session));
+        const provider = providerOf(session, doc);
         if (own instanceof AcpChat) own.stop();
-        else await (await conversation(session)).abort(ctx).catch(() => {});
+        if (provider) {
+          const [command, ...args] = provider.dispose?.(session, doc.dirs[session] ?? process.cwd()) ?? [];
+          if (command) await new Promise((done) => spawn(command, args, { stdio: "ignore" }).once("exit", done).once("error", done));
+          await harness().commit(async (tx) => void Object.assign(await tx.doc(Transcripts, session, null), { turns: [], ids: [] }), ctx);
+        } else await (await conversation(session)).abort(ctx).catch(() => {});
         await update((d) => {
           for (const field of [d.ids, d.titles, d.created, d.meta, d.providers, d.acp, d.dirs]) delete field[session];
         });

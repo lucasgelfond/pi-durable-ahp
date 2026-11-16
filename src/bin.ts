@@ -12,27 +12,27 @@ import { NodeExecutionEnv } from "@earendil-works/pi-durable/env/node";
 import { openNodeSqliteStorage } from "@earendil-works/pi-durable/storage/sqlite/node";
 import { CodingTools } from "@earendil-works/pi-durable/tools";
 import type { AcpProvider } from "./acp-chat.ts";
+import { piAgent } from "./pi.ts";
 import { durableAhp } from "./sessions.ts";
 
-// A host on this machine for a terminal's own agents: each session an ACP agent's (pi, Claude Code, Gemini CLI, …: the
-// config's `providers`), or pi-durable's own coding agent if the config names a model (`pi`, its key from the
+// A host on this machine for a terminal's own agents: each session an ACP agent's (pi in its own TUI, Claude Code,
+// Gemini CLI, …: the config's `providers`), or pi-durable's own coding agent if the config names a model (`pi`, its key from the
 // environment as pi-ai finds it), the catalogue and pi's own sessions kept in SQLite. AHP at /ahp, on a unix socket only its
 // user can open, and on 127.0.0.1 if asked for a port: nothing listens beyond this machine. An
 // agent's process is started (npx fetching it, the first time) only once one of its sessions is used.
 //
 //   pi-durable-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
 //
-// The config, JSON: { "providers": [{ "id", "displayName", "command", "args"?, "env"? }], "pi"?: { "provider", "modelId" } }.
-// Without one, the agents below.
+// The config, JSON: { "providers": [{ "id", "displayName", "command", "args"?, "env"? }], "pi"?: { "provider", "modelId" },
+// "piCommand"?: ["pi", …] }. pi in its own terminal ("pi") is always there; beside it the config's providers, or
+// without them the agents below.
 
-const DEFAULTS: AcpProvider[] = [
-  // pi-acp starts the pi on PATH (`pi --mode rpc`).
-  { id: "pi", displayName: "pi", command: "npx", args: ["-y", "pi-acp@0.0.34"] },
+const home = join(homedir(), ".concourse");
+const AGENTS: AcpProvider[] = [
   { id: "claude", displayName: "Claude Code", command: "npx", args: ["-y", "@agentclientprotocol/claude-agent-acp@0.99.1"] },
   { id: "gemini", displayName: "Gemini CLI", command: "npx", args: ["-y", "@google/gemini-cli@0.66.0", "--acp"] },
 ];
 
-const home = join(homedir(), ".concourse");
 const { values: args } = parseArgs({
   options: {
     config: { type: "string", default: join(home, "host.json") },
@@ -41,7 +41,9 @@ const { values: args } = parseArgs({
     port: { type: "string" },
   },
 });
-const config = (existsSync(args.config!) ? JSON.parse(readFileSync(args.config!, "utf8")) : {}) as { providers?: AcpProvider[]; pi?: { provider: string; modelId: string } };
+const config = (existsSync(args.config!) ? JSON.parse(readFileSync(args.config!, "utf8")) : {}) as { providers?: AcpProvider[]; pi?: { provider: string; modelId: string }; piCommand?: string[] };
+// pi on PATH (or the config's piCommand), in a terminal of its own (pi.ts), its files beside the database.
+const tui = piAgent({ dir: dirname(args.db!), pi: config.piCommand });
 const ctx = BACKGROUND_CONTEXT;
 
 mkdirSync(dirname(args.db!), { recursive: true });
@@ -69,7 +71,7 @@ const ahp = durableAhp({
     create: (_session, { workingDirectory }) =>
       harness.createConversation({ ownership: { kind: "ownerless" }, agent: { model: pi, cwd: workingDirectory ?? homedir() } }, ctx),
   }),
-  providers: config.providers ?? DEFAULTS,
+  providers: [tui, ...(config.providers ?? AGENTS)],
 });
 
 const server = createServer((_req, res) => res.writeHead(404).end());

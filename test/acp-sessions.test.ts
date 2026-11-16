@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { AhpClient } from "@microsoft/agent-host-protocol/client";
-import { expect, test } from "vitest";
+import { expect, onTestFinished, test } from "vitest";
 import { client, follow, scripted, serve, until } from "./support.ts";
 
 // Sessions backed by an ACP agent (the scripted one, acp-agent.ts, a process of its own per session), driven by
@@ -151,11 +151,15 @@ test("a host started again loads the agent's session (session/load), its history
   await until(() => chat.state.turns.length === 2);
   expect(said(chat.state.turns[1].responseParts)).toBe("echo: and again");
 
+  // One that can't: what was said is still the chat's (the host's transcript), and the chat says the agent forgot it.
   const fresh = (await follow(later.c, `ahp-chat:/${forgetful}`)) as unknown as { state: Shown };
   turnOf(later, forgetful, "still there?");
-  await until(() => fresh.state.turns.length === 2);
-  expect(fresh.state.turns[0].message).toMatchObject({ origin: { kind: "systemNotification" } });
-  expect(fresh.state.turns[0].message.text).toContain("starts afresh");
+  await until(() => fresh.state.turns.length === 3);
+  const [notice, kept, asked] = fresh.state.turns;
+  expect(kept.message.text).toBe(`hello ${forgetful.slice(0, 4)}`);
+  expect(notice.message).toMatchObject({ origin: { kind: "systemNotification" } });
+  expect(notice.message.text).toContain("starts afresh");
+  expect(said(asked.responseParts)).toBe("echo: still there?");
   later.ws.close();
   again.close();
 });
@@ -170,22 +174,25 @@ test("the local host bin: an ACP agent's session over AHP on its unix socket, ke
       bin.stdout.on("data", (d: Buffer) => String(d).includes("listening on") && resolve());
       bin.once("exit", (code) => reject(new Error(`the host exited (${code})`)));
     });
+    // Ended whatever the test's outcome, so a failure can't leave it running.
+    onTestFinished(() => void bin.kill("SIGTERM"));
     return bin;
   };
-  let bin = await start();
+  const firstBin = await start();
   const first = await client(`ws+unix://${socket}:/ahp`);
   const root = await first.c.subscribe("ahp-root://");
-  expect((root.result.snapshot!.state as { agents: { provider: string }[] }).agents.map((a) => a.provider)).toEqual(["scripted"]);
+  // pi in its own terminal is always there; the config's agents beside it.
+  expect((root.result.snapshot!.state as { agents: { provider: string }[] }).agents.map((a) => a.provider)).toEqual(["pi", "scripted"]);
   const session = await agentSession(first);
   const chat = (await follow(first.c, `ahp-chat:/${session}`)) as unknown as { state: Shown };
   turnOf(first, session, "edit notes.txt");
   await until(() => chat.state.turns.length === 1);
   expect(said(chat.state.turns[0].responseParts)).toBe("edited");
   first.ws.close();
-  bin.kill("SIGTERM");
-  await new Promise((r) => bin.once("exit", r));
+  firstBin.kill("SIGTERM");
+  await new Promise((r) => firstBin.once("exit", r));
 
-  bin = await start();
+  const bin = await start();
   const second = await client(`ws+unix://${socket}:/ahp`);
   const { items } = await second.c.request("listSessions", { channel: "ahp-root://" });
   expect(items.find((s) => s.resource === `ahp-session:/${session}`)?.title).toBe("edit notes.txt");

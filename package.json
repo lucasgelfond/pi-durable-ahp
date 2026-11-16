@@ -1,7 +1,7 @@
 {
   "name": "pi-durable-ahp",
   "version": "0.1.0",
-  "description": "The Agent Host Protocol for pi-durable: each conversation a session, its subagents chats beside it, and ACP agents (Claude Code, pi, Gemini CLI) as sessions too",
+  "description": "The Agent Host Protocol for pi-durable: each conversation a session, its subagents chats beside it, ACP agents (Claude Code, Gemini CLI) as sessions too, and pi's own TUI as a session anyone can attach to",
   "type": "module",
   "exports": {
     ".": {
@@ -11,7 +11,8 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "pi"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -26,12 +27,13 @@
   },
   "peerDependencies": {
     "@earendil-works/chord": "1.5.2",
-    "@earendil-works/pi-durable": "1.5.2",
-    "@earendil-works/pi-ai": "1.5.2"
+    "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-durable": "1.5.2"
   },
   "devDependencies": {
     "@earendil-works/chord": "1.5.2",
     "@earendil-works/pi-ai": "1.5.2",
+    "@earendil-works/pi-coding-agent": "1.5.2",
     "@earendil-works/pi-durable": "1.5.2",
     "@types/node": "22.20.5",
     "@types/ws": "8.18.1",
