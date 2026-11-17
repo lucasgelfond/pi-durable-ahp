@@ -10,6 +10,7 @@ export interface AcpProvider {
     connect?(session: string, cwd: string): string[];
     follow?: boolean;
     meta?(session: string): Record<string, unknown>;
+    stop?(session: string, cwd: string): string[];
     dispose?(session: string, cwd: string): string[];
 }
 export type Shown = {
@@ -37,6 +38,7 @@ export declare class AcpChat {
     readonly onSession?: (sessionId: string) => Promise<void>;
     readonly onTitle?: (title: string) => void;
     readonly onTurn?: (turn: Shown, ids: string[]) => void;
+    readonly onCwd?: (cwd: string) => void;
     readonly key: string;
     constructor(opts: {
         host: AhpHost;
@@ -46,10 +48,12 @@ export declare class AcpChat {
         cwd: string;
         session?: string;
         transcript?: Transcript;
+        paused?: boolean;
         onStatus?: (status: number) => void;
         onSession?: (sessionId: string) => Promise<void>;
         onTitle?: (title: string) => void;
         onTurn?: (turn: Shown, ids: string[]) => void;
+        onCwd?: (cwd: string) => void;
     });
     get running(): boolean;
     open(title: string, meta?: Record<string, unknown>): void;
@@ -59,5 +63,6 @@ export declare class AcpChat {
     pending(kind: "steering" | "queued", id: string, text: string): Promise<void>;
     refused(turnId: string, why: string): void;
     cancel(): Promise<void>;
+    resume(): void;
     stop(): void;
 }

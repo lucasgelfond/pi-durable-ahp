@@ -31,6 +31,7 @@ export class AcpChat {
     onSession;
     onTitle;
     onTurn;
+    onCwd;
     // The host's session this chat is.
     key;
     #session;
@@ -63,6 +64,8 @@ export class AcpChat {
         this.onSession = opts.onSession;
         this.onTitle = opts.onTitle;
         this.onTurn = opts.onTurn;
+        this.onCwd = opts.onCwd;
+        this.#stopped = Boolean(opts.paused);
     }
     get running() {
         return this.#turn !== undefined;
@@ -75,8 +78,13 @@ export class AcpChat {
             if (this.#transcript.length)
                 this.#dispatch({ type: "chat/turnsLoaded", turns: this.#transcript });
         }
-        if (this.#session || this.provider.follow)
-            void this.#connect().catch((err) => this.#notice(err.message));
+        if (!this.#stopped && (this.#session || this.provider.follow))
+            void this.#connect().catch((err) => this.#failed(err));
+    }
+    // A connection that failed, said in the chat, unless it was stopped on purpose.
+    #failed(err) {
+        if (!this.#stopped)
+            this.#notice(err.message);
     }
     #dispatch(action) {
         this.host.dispatch(this.uri, act(action));
@@ -108,9 +116,13 @@ export class AcpChat {
                 .connect(acp.ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));
             const init = await race(agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }));
             const steering = Boolean(init.agentCapabilities?._meta?.steering?.supported);
-            // An agent that is one running session: that one.
-            if (!this.#session && this.provider.follow)
-                this.#session = (await race(agent.request(acp.methods.agent.session.list, {}))).sessions[0]?.sessionId;
+            // An agent that is one running session: that one, and where it works.
+            if (this.provider.follow) {
+                const [running] = (await race(agent.request(acp.methods.agent.session.list, {}))).sessions;
+                this.#session ??= running?.sessionId;
+                if (running?.cwd)
+                    this.onCwd?.(running.cwd);
+            }
             const before = this.#session;
             if (before && init.agentCapabilities?.loadSession) {
                 this.#loading = [];
@@ -382,8 +394,10 @@ export class AcpChat {
         this.#dispatch({ type: "chat/turnStarted", turnId, startedAt: now(), message: { text, origin: { kind: "user" } } });
         this.onStatus?.(8);
     }
-    // A client started a turn (its action is committed already): the agent's prompt, answered when the agent stops.
+    // A client started a turn (its action is committed already): the agent's prompt, answered when the agent stops. An
+    // agent stopped (its session archived) starts again for it.
     async started(turnId, text) {
+        this.#stopped = false;
         this.#turn = { id: turnId, started: Date.now(), calls: new Map(), ids: [] };
         this.onStatus?.(8);
         try {
@@ -464,7 +478,14 @@ export class AcpChat {
         if (agent)
             await agent.agent.notify(acp.methods.agent.session.cancel, { sessionId: agent.sessionId }).catch(() => { });
     }
-    // The connection to the agent stopped (the session deleted, or the host closing).
+    // Connected to again after `stop` (the session brought back from the archive).
+    resume() {
+        this.#stopped = false;
+        this.#retry = RECONNECT_MS;
+        if (this.provider.follow && !this.#agent)
+            void this.#connect().catch((err) => this.#failed(err));
+    }
+    // The connection to the agent stopped (the session archived or deleted, or the host closing).
     stop() {
         this.#stopped = true;
         const child = this.#child;

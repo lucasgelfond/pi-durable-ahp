@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { IncomingMessage } from "node:http";
 import type { Duplex } from "node:stream";
+import { basename } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { Context } from "@earendil-works/chord/context";
 import { type Conversation, type ConversationId, defineDoc, defineDocFamily, type Harness, type JsonObject } from "@earendil-works/pi-durable";
@@ -22,10 +23,14 @@ const CHAT = "ahp-chat:/";
 // AHP's statuses: idle, and working.
 const IDLE = 1;
 const WORKING = 8;
+// AHP's flags on a session's status, beside its activity.
+const IS_READ = 1 << 5;
+const IS_ARCHIVED = 1 << 6;
 
 // Which conversation each session is ("" for an ACP agent's), its title, when it was made, and its creator's _meta (as
 // JSON); and for an ACP agent's session, which agent (`providers`), its session id there (`acp`), and its working
-// directory (`dirs`, any session's that was given one).
+// directory (`dirs`, any session's that was given one; `work`, where its agent says it works, a workspace of its own
+// say). Archived sessions (`archived`), and when a client last read each (`read`).
 type SessionsDoc = {
   ids: Record<string, string>;
   titles: Record<string, string>;
@@ -34,8 +39,11 @@ type SessionsDoc = {
   providers: Record<string, string>;
   acp: Record<string, string>;
   dirs: Record<string, string>;
+  work: Record<string, string>;
+  archived: Record<string, string>;
+  read: Record<string, string>;
 };
-const empty = (): SessionsDoc => ({ ids: {}, titles: {}, created: {}, meta: {}, providers: {}, acp: {}, dirs: {} });
+const empty = (): SessionsDoc => ({ ids: {}, titles: {}, created: {}, meta: {}, providers: {}, acp: {}, dirs: {}, work: {}, archived: {}, read: {} });
 const Sessions = defineDoc<SessionsDoc>({
   kind: "pi-durable-ahp.sessions",
   version: 1,
@@ -119,7 +127,18 @@ export function durableAhp(opts: DurableAhpOptions) {
   // An ACP agent's session's agent; undefined for a pi-durable conversation's.
   const providerOf = (session: string, doc: SessionsDoc) => (doc.providers[session] ? opts.providers?.find((p) => p.id === doc.providers[session]) : undefined);
   const providerName = (session: string, doc: SessionsDoc) => doc.providers[session] ?? opts.agent?.provider ?? "";
-  const dirsOf = (session: string, doc: SessionsDoc) => (doc.dirs[session] ? { workingDirectories: [pathToFileURL(doc.dirs[session]).href] } : {});
+  // Where a session works, and (when that's somewhere of its own) the project it was given.
+  const dirsOf = (session: string, doc: SessionsDoc) => {
+    const given = doc.dirs[session];
+    const work = doc.work[session] ?? given;
+    return {
+      ...(work && { workingDirectories: [pathToFileURL(work).href] }),
+      ...(given && work !== given && { project: { uri: pathToFileURL(given).href, displayName: basename(given) } }),
+    };
+  };
+  // A session's status flags: archived, and read since it last changed.
+  const flagsOf = (session: string, doc: SessionsDoc, modifiedAt: string) =>
+    (doc.archived[session] ? IS_ARCHIVED : 0) | (doc.read[session] && doc.read[session] >= modifiedAt ? IS_READ : 0);
   const sessionOf = (uri: string) => (uri.startsWith(SESSION) ? uri.slice(SESSION.length) : uri.startsWith(CHAT) ? uri.slice(CHAT.length).split("/")[0] : undefined);
   const keyOf = (uri: string) => (uri.startsWith(CHAT) ? uri.slice(CHAT.length).split("/")[1] : undefined);
   const chatUri = (session: string, key?: string): URI => `${CHAT}${session}${key === undefined ? "" : `/${key}`}`;
@@ -187,7 +206,7 @@ export function durableAhp(opts: DurableAhpOptions) {
         provider: providerName(session, doc),
         ...dirsOf(session, doc),
         title: titleOf(session, doc),
-        status: own?.status ?? IDLE,
+        status: (own?.status ?? IDLE) | flagsOf(session, doc, own?.modifiedAt ?? made),
         createdAt: made,
         modifiedAt: own?.modifiedAt ?? made,
         defaultChat: chatUri(session),
@@ -204,8 +223,16 @@ export function durableAhp(opts: DurableAhpOptions) {
   const statusChanged = (session: string, uri: URI) => (status: number) => {
     const at = new Date().toISOString();
     if (host.has(`${SESSION}${session}`)) host.dispatch(`${SESSION}${session}`, act({ type: "session/chatUpdated", chat: uri, changes: { status, modifiedAt: at } }));
-    if (uri === chatUri(session)) void catalogue().then(() => host.notify(ROOT, "root/sessionSummaryChanged", { session: `${SESSION}${session}`, changes: { status, modifiedAt: at } }), quiet);
+    if (uri === chatUri(session)) void summaryChanged(session, { status, modifiedAt: at }).catch(quiet);
   };
+  // A session's summary changed, to every client: CHANGES, its status (an activity, or as it was) with its flags.
+  async function summaryChanged(session: string, changes: { status?: number; modifiedAt?: string; workingDirectories?: string[] } = {}) {
+    const summary = (await catalogue()).find((s) => s.resource === `${SESSION}${session}`);
+    if (!summary) return;
+    const activity = changes.status ?? summary.status & ~(IS_READ | IS_ARCHIVED);
+    const status = activity | flagsOf(session, await read(), changes.modifiedAt ?? summary.modifiedAt);
+    host.notify(ROOT, "root/sessionSummaryChanged", { session: summary.resource, changes: { ...changes, status } });
+  }
 
   // A chat's channel: a conversation's turns, or (a chat without one) only what it's called and its _meta.
   async function openChat(session: string, uri: URI, title: string, handle?: Conversation, meta?: Record<string, unknown>) {
@@ -240,13 +267,47 @@ export function durableAhp(opts: DurableAhpOptions) {
       cwd: doc.dirs[session] ?? process.cwd(),
       session: doc.acp[session] || undefined,
       transcript: transcript && JSON.parse(JSON.stringify(transcript)),
+      // An archived session's agent stays stopped until it's wanted.
+      paused: Boolean(doc.archived[session]),
       onStatus: statusChanged(session, uri),
+      onCwd: (cwd) => void worksIn(session, cwd).catch(quiet),
       onSession: (id) => update((d) => void (d.acp[session] = id)).then(() => {}),
       onTitle: (t) => void retitle(session, uri, t).catch(quiet),
       onTurn: (turn, ids) => void keep(session, turn, ids).catch(quiet),
     });
     chats.set(uri, chat);
     chat.open(titleOf(session, doc));
+  }
+  // Where a session's agent says it works (pi.ts: its workspace), once it says so: the session's working directory.
+  async function worksIn(session: string, cwd: string) {
+    const doc = await read();
+    const before = doc.work[session] ?? doc.dirs[session];
+    if (before === cwd) return;
+    await update((d) => void (d.work[session] = cwd));
+    const uri = `${SESSION}${session}`;
+    const directory = pathToFileURL(cwd).href;
+    if (host.has(uri))
+      host.dispatch(uri, act(before ? { type: "session/workingDirectoryReplaced", directory: pathToFileURL(before).href, replacement: directory } : { type: "session/workingDirectorySet", directory }));
+    await summaryChanged(session, { workingDirectories: [directory] });
+  }
+  // A client archived the session, or brought it back: its agent stops (an ACP agent's provider says how, kept to
+  // resume: pi.ts stops its pi) or starts again.
+  async function archived(session: string, isArchived: boolean) {
+    await update((d) => (isArchived ? void (d.archived[session] = new Date().toISOString()) : void delete d.archived[session]));
+    const chat = chats.get(chatUri(session));
+    if (chat instanceof AcpChat) {
+      if (isArchived) {
+        chat.stop();
+        const doc = await read();
+        const [command, ...args] = chat.provider.stop?.(session, doc.dirs[session] ?? process.cwd()) ?? [];
+        if (command) await new Promise((done) => spawn(command, args, { stdio: "ignore" }).once("exit", done).once("error", done));
+      } else chat.resume();
+    }
+    await summaryChanged(session);
+  }
+  async function wasRead(session: string, isRead: boolean) {
+    await update((d) => (isRead ? void (d.read[session] = new Date().toISOString()) : void delete d.read[session]));
+    await summaryChanged(session);
   }
   const keep = (session: string, turn: Shown, ids: string[]) =>
     harness().commit(async (tx) => {
@@ -276,7 +337,7 @@ export function durableAhp(opts: DurableAhpOptions) {
     const doc = await read();
     const title = titleOf(session, doc);
     const meta = metaOf(session, doc);
-    host.create(uri, { provider: providerName(session, doc), ...dirsOf(session, doc), title, status: IDLE, lifecycle: "ready", activeClients: [], chats: [], ...(meta && { _meta: meta }) });
+    host.create(uri, { provider: providerName(session, doc), ...dirsOf(session, doc), title, status: IDLE | flagsOf(session, doc, new Date(0).toISOString()), lifecycle: "ready", activeClients: [], chats: [], ...(meta && { _meta: meta }) });
     if (provider) await openAgent(session, provider, doc);
     else await openChat(session, chatUri(session), title, handle);
     host.dispatch(uri, act({ type: "session/chatAdded", summary: { resource: chatUri(session), title, status: IDLE, modifiedAt: new Date().toISOString(), origin: { kind: "user" } } }));
@@ -371,7 +432,7 @@ export function durableAhp(opts: DurableAhpOptions) {
           await harness().commit(async (tx) => void Object.assign(await tx.doc(Transcripts, session, null), { turns: [], ids: [] }), ctx);
         } else await (await conversation(session)).abort(ctx).catch(() => {});
         await update((d) => {
-          for (const field of [d.ids, d.titles, d.created, d.meta, d.providers, d.acp, d.dirs]) delete field[session];
+          for (const field of [d.ids, d.titles, d.created, d.meta, d.providers, d.acp, d.dirs, d.work, d.archived, d.read]) delete field[session];
         });
         conversations.delete(session);
         for (const open of [...chats.keys()]) if (sessionOf(open) === session) (chats.delete(open), host.delete(open));
@@ -405,7 +466,9 @@ export function durableAhp(opts: DurableAhpOptions) {
         const session = sessionOf(channel)!;
         const key = keyOf(channel);
         const chat = chats.get(channel);
-        const a = action as unknown as { type: string; turnId: string; message?: { text: string } };
+        const a = action as unknown as { type: string; turnId: string; message?: { text: string }; isArchived?: boolean; isRead?: boolean };
+        if (a.type === "session/isArchivedChanged") void archived(session, Boolean(a.isArchived)).catch(quiet);
+        if (a.type === "session/isReadChanged") void wasRead(session, Boolean(a.isRead)).catch(quiet);
         if (a.type === "chat/turnStarted") {
           const text = a.message?.text ?? "";
           if (key === undefined) void title(session, channel, text).catch(quiet);

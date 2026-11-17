@@ -2,7 +2,9 @@ import { fileURLToPath } from "node:url";
 import type { AcpProvider } from "./acp-chat.ts";
 
 // pi's own TUI as an ACP agent's session (pi/acp.ts): each session one pi, kept running under dtach in its place
-// (here, or in a box `shell` reaches), in a jj workspace of its own when its working directory is a jj repo. The
+// (here, or in a box `shell` reaches), in a jj workspace of its own when its working directory is a jj repo's main
+// checkout (a workspace already, it works there as it is); pi says where it works, so the session's working directory
+// is that. Archived, its pi stops (`stop`), its session file and workspace kept for it to carry on from. The
 // host's connection is the same script every time: it starts the session's pi if it isn't running (`--session-id` the
 // session's, so a restarted pi carries on from its session file), waits for its socket, and becomes the bridge to it.
 // Anyone can open the same pi's terminal with the session's _meta.pi.attach, and what's typed there shows in the chat.
@@ -49,7 +51,7 @@ export function piAgent(opts: PiOptions): AcpProvider {
           "set -e",
           `mkdir -p ${f.run} ${f.workspaces}`,
           `cd ${quote(cwd)}`,
-          `if [ -d .jj ]; then [ -d ${f.workspace} ] || jj workspace add --quiet --name ${quote(session)} ${f.workspace}; cd ${f.workspace}; fi`,
+          `if [ -d .jj/repo ]; then [ -d ${f.workspace} ] || jj workspace add --quiet --name ${quote(session)} ${f.workspace}; cd ${f.workspace}; fi`,
           `if ! ${running(f.tty)}; then`,
           `  rm -f ${f.acp} ${f.tty}`,
           `  PI_ACP_SOCKET=${f.acp} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; exec ${command} --session-id ${quote(session)}`)}`,
@@ -60,6 +62,10 @@ export function piAgent(opts: PiOptions): AcpProvider {
       );
     },
     meta: (session) => ({ pi: { attach: shell(`exec dtach -a ${files(session).tty} -r winch -z`) } }),
+    stop(session) {
+      const f = files(session);
+      return shell(`${running(f.tty)} && kill "$(cat ${f.pid})"; true`);
+    },
     dispose(session, cwd) {
       const f = files(session);
       return shell(

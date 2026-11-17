@@ -47,8 +47,12 @@ export interface DurableAhpOptions {
 export declare function durableAhp(opts: DurableAhpOptions): {
     host: AhpHost;
     conversation: (session: string) => Promise<Conversation>;
-    catalogue: () => Promise<({
-        workingDirectories: string[];
+    catalogue: () => Promise<{
+        workingDirectories?: string[] | undefined;
+        project?: {
+            uri: string;
+            displayName: string;
+        } | undefined;
         resource: string;
         provider: string;
         title: string;
@@ -67,27 +71,7 @@ export declare function durableAhp(opts: DurableAhpOptions): {
             _meta?: Record<string, unknown> | undefined;
         }[];
         _meta?: Record<string, unknown> | undefined;
-    } | {
-        workingDirectories?: undefined;
-        resource: string;
-        provider: string;
-        title: string;
-        status: number;
-        createdAt: string;
-        modifiedAt: string;
-        defaultChat: string;
-        chats: {
-            resource: string;
-            title: string;
-            status: number;
-            modifiedAt: string;
-            origin: {
-                kind: string;
-            };
-            _meta?: Record<string, unknown> | undefined;
-        }[];
-        _meta?: Record<string, unknown> | undefined;
-    })[]>;
+    }[]>;
     changed: (session: string) => Promise<void>;
     close(): void;
     accept: (ws: WebSocket) => void;

@@ -33,7 +33,9 @@ export interface AcpProvider {
   follow?: boolean;
   // The session's _meta of the agent's own (pi.ts: how to open its terminal).
   meta?(session: string): Record<string, unknown>;
-  // The command line that ends the session's agent and what it made, when the session is deleted.
+  // The command lines that stop the session's agent, keeping it to resume (the session archived), and that end it and
+  // what it made (the session deleted).
+  stop?(session: string, cwd: string): string[];
   dispose?(session: string, cwd: string): string[];
 }
 
@@ -74,6 +76,7 @@ export class AcpChat {
   readonly onSession?: (sessionId: string) => Promise<void>;
   readonly onTitle?: (title: string) => void;
   readonly onTurn?: (turn: Shown, ids: string[]) => void;
+  readonly onCwd?: (cwd: string) => void;
   // The host's session this chat is.
   readonly key: string;
   #session?: string;
@@ -102,10 +105,12 @@ export class AcpChat {
     cwd: string;
     session?: string;
     transcript?: Transcript;
+    paused?: boolean;
     onStatus?: (status: number) => void;
     onSession?: (sessionId: string) => Promise<void>;
     onTitle?: (title: string) => void;
     onTurn?: (turn: Shown, ids: string[]) => void;
+    onCwd?: (cwd: string) => void;
   }) {
     this.host = opts.host;
     this.uri = opts.uri;
@@ -119,6 +124,8 @@ export class AcpChat {
     this.onSession = opts.onSession;
     this.onTitle = opts.onTitle;
     this.onTurn = opts.onTurn;
+    this.onCwd = opts.onCwd;
+    this.#stopped = Boolean(opts.paused);
   }
 
   get running() {
@@ -132,7 +139,12 @@ export class AcpChat {
       this.host.create(this.uri, chatState(this.uri, title, meta));
       if (this.#transcript.length) this.#dispatch({ type: "chat/turnsLoaded", turns: this.#transcript });
     }
-    if (this.#session || this.provider.follow) void this.#connect().catch((err: Error) => this.#notice(err.message));
+    if (!this.#stopped && (this.#session || this.provider.follow)) void this.#connect().catch((err: Error) => this.#failed(err));
+  }
+
+  // A connection that failed, said in the chat, unless it was stopped on purpose.
+  #failed(err: Error) {
+    if (!this.#stopped) this.#notice(err.message);
   }
 
   #dispatch(action: object) {
@@ -167,8 +179,12 @@ export class AcpChat {
         .connect(acp.ndJsonStream(Writable.toWeb(child.stdin!) as WritableStream<Uint8Array>, Readable.toWeb(child.stdout!) as ReadableStream<Uint8Array>));
       const init = await race(agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }));
       const steering = Boolean((init.agentCapabilities?._meta as { steering?: { supported?: boolean } } | undefined)?.steering?.supported);
-      // An agent that is one running session: that one.
-      if (!this.#session && this.provider.follow) this.#session = (await race(agent.request(acp.methods.agent.session.list, {}))).sessions[0]?.sessionId;
+      // An agent that is one running session: that one, and where it works.
+      if (this.provider.follow) {
+        const [running] = (await race(agent.request(acp.methods.agent.session.list, {}))).sessions;
+        this.#session ??= running?.sessionId;
+        if (running?.cwd) this.onCwd?.(running.cwd);
+      }
       const before = this.#session;
       if (before && init.agentCapabilities?.loadSession) {
         this.#loading = [];
@@ -413,8 +429,10 @@ export class AcpChat {
     this.onStatus?.(8);
   }
 
-  // A client started a turn (its action is committed already): the agent's prompt, answered when the agent stops.
+  // A client started a turn (its action is committed already): the agent's prompt, answered when the agent stops. An
+  // agent stopped (its session archived) starts again for it.
   async started(turnId: string, text: string) {
+    this.#stopped = false;
     this.#turn = { id: turnId, started: Date.now(), calls: new Map(), ids: [] };
     this.onStatus?.(8);
     try {
@@ -485,7 +503,14 @@ export class AcpChat {
     if (agent) await agent.agent.notify(acp.methods.agent.session.cancel, { sessionId: agent.sessionId }).catch(() => {});
   }
 
-  // The connection to the agent stopped (the session deleted, or the host closing).
+  // Connected to again after `stop` (the session brought back from the archive).
+  resume() {
+    this.#stopped = false;
+    this.#retry = RECONNECT_MS;
+    if (this.provider.follow && !this.#agent) void this.#connect().catch((err: Error) => this.#failed(err));
+  }
+
+  // The connection to the agent stopped (the session archived or deleted, or the host closing).
   stop() {
     this.#stopped = true;
     const child = this.#child;

@@ -1,8 +1,8 @@
 import { execFileSync, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, expect, onTestFinished, test } from "vitest";
 import { piAgent } from "../src/index.ts";
@@ -265,6 +265,95 @@ test("after a crash (pi and its dtach killed outright, their files left, the pid
   expect([restarted === process.pid, isRunning(restarted)]).toEqual([false, true]);
   later.ws.close();
 }, 60_000);
+
+// The session's summary as the host lists it.
+const listed = async (s: { c: { c: { request: (m: "listSessions", p: never) => Promise<{ items: { resource: string; status: number; workingDirectories?: string[]; project?: { uri: string; displayName: string } }[] }> } }; id: string }) =>
+  (await s.c.c.request("listSessions", { channel: "ahp-root://" } as never)).items.find((i) => i.resource === `ahp-session:/${s.id}`)!;
+const IS_READ = 1 << 5;
+const IS_ARCHIVED = 1 << 6;
+
+test.for(places)("$place: the session works in its own workspace (as pi says), and its project is the repo it was given", async ({ shell }) => {
+  const s = await session(shell);
+  await until(async () => (await listed(s)).workingDirectories?.[0]?.endsWith(`/workspaces/${s.id}`) ?? false);
+  const summary = await listed(s);
+  expect(summary.workingDirectories).toEqual([pathToFileURL(realpathSync(s.files.workspace)).href]);
+  expect(summary.project).toEqual({ uri: pathToFileURL(s.repo).href, displayName: basename(s.repo) });
+});
+
+test("a jj workspace given as the working directory is used as it is: no workspace inside it", async () => {
+  const repo = mkdtempSync(join(root, "repo-"));
+  run(repo, "jj", "git", "init", "--quiet");
+  const given = `${repo}-mine`;
+  run(repo, "jj", "workspace", "add", "--quiet", "--name", "mine", given);
+  const dir = mkdtempSync(join(root, "files-"));
+  const host = await serve({ providers: [piAgent({ dir, pi: PI })] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const id = randomUUID();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(given).href] } as never);
+  const chat = (await follow(c.c, `ahp-chat:/${id}`)) as unknown as Chat;
+  c.c.dispatch(`ahp-chat:/${id}`, { type: "chat/turnStarted", turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: "in my workspace", origin: { kind: "user" } } } as never);
+  await until(() => chat.state.turns.length === 1, 30_000);
+  const header = JSON.parse(readFileSync(sessionFile(id), "utf8").split("\n")[0]) as { cwd: string };
+  expect([header.cwd, existsSync(join(dir, "workspaces", id))]).toEqual([realpathSync(given), false]);
+  expect(run(repo, "jj", "workspace", "list").split("\n").filter(Boolean)).toHaveLength(2);
+  c.ws.close();
+});
+
+test("archiving (AHP's session/isArchivedChanged) stops pi and keeps the session, its file and workspace; a host started meanwhile leaves it stopped; bringing it back starts pi on the same session", async () => {
+  const s = await session();
+  s.prompt("before the archive");
+  await until(() => s.chat.state.turns.length === 1, 30_000);
+  const first = Number(readFileSync(s.files.pid, "utf8"));
+  s.c.c.dispatch(`ahp-session:/${s.id}`, { type: "session/isArchivedChanged", isArchived: true } as never);
+  await until(() => !isRunning(first), 10_000);
+  await until(async () => ((await listed(s)).status & IS_ARCHIVED) !== 0);
+  expect([existsSync(s.files.workspace), s.chat.state.turns.length]).toEqual([true, 1]);
+
+  // A host started while it's archived shows its transcript, and doesn't start its pi.
+  s.c.ws.close();
+  s.host.close();
+  const again = await serve({ providers: [s.pi] });
+  hosts.push(again.close);
+  const later = await client(again.url);
+  const chat = (await follow(later.c, `ahp-chat:/${s.id}`)) as unknown as Chat;
+  const back = { c: later, id: s.id };
+  expect(chat.state.turns.map((t) => t.message.text)).toEqual(["before the archive"]);
+  await new Promise((r) => setTimeout(r, 2000));
+  expect([existsSync(s.files.tty), ((await listed(back)).status & IS_ARCHIVED) !== 0]).toEqual([false, true]);
+
+  later.c.dispatch(`ahp-session:/${s.id}`, { type: "session/isArchivedChanged", isArchived: false } as never);
+  await until(() => existsSync(s.files.acp) && existsSync(s.files.tty), 30_000);
+  await until(async () => ((await listed(back)).status & IS_ARCHIVED) === 0);
+  later.c.dispatch(`ahp-chat:/${s.id}`, { type: "chat/turnStarted", turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: "after the archive", origin: { kind: "user" } } } as never);
+  await until(() => chat.state.turns.length === 2, 30_000);
+  expect(said(chat.state.turns[1])).toBe("echo: after the archive");
+  const file = readFileSync(sessionFile(s.id), "utf8");
+  expect([file.includes("before the archive"), file.includes("after the archive")]).toEqual([true, true]);
+  later.ws.close();
+}, 90_000);
+
+test("a prompt to an archived session starts its pi again", async () => {
+  const s = await session();
+  const first = Number(readFileSync(s.files.pid, "utf8"));
+  s.c.c.dispatch(`ahp-session:/${s.id}`, { type: "session/isArchivedChanged", isArchived: true } as never);
+  await until(() => !isRunning(first), 10_000);
+  s.prompt("wake up");
+  await until(() => s.chat.state.turns.length === 1, 30_000);
+  expect(said(s.chat.state.turns[0])).toBe("echo: wake up");
+});
+
+test("read (AHP's session/isReadChanged) is a flag on the session's status until it changes again", async () => {
+  const s = await session();
+  s.prompt("read me");
+  await until(() => s.chat.state.turns.length === 1, 30_000);
+  expect((await listed(s)).status & IS_READ).toBe(0);
+  s.c.c.dispatch(`ahp-session:/${s.id}`, { type: "session/isReadChanged", isRead: true } as never);
+  await until(async () => ((await listed(s)).status & IS_READ) !== 0);
+  s.prompt("now unread");
+  await until(() => s.chat.state.turns.length === 2, 30_000);
+  await until(async () => ((await listed(s)).status & IS_READ) === 0);
+});
 
 test("deleting the session ends its pi and forgets its workspace", async () => {
   const s = await session();

@@ -28,7 +28,7 @@ export function piAgent(opts) {
                 "set -e",
                 `mkdir -p ${f.run} ${f.workspaces}`,
                 `cd ${quote(cwd)}`,
-                `if [ -d .jj ]; then [ -d ${f.workspace} ] || jj workspace add --quiet --name ${quote(session)} ${f.workspace}; cd ${f.workspace}; fi`,
+                `if [ -d .jj/repo ]; then [ -d ${f.workspace} ] || jj workspace add --quiet --name ${quote(session)} ${f.workspace}; cd ${f.workspace}; fi`,
                 `if ! ${running(f.tty)}; then`,
                 `  rm -f ${f.acp} ${f.tty}`,
                 `  PI_ACP_SOCKET=${f.acp} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; exec ${command} --session-id ${quote(session)}`)}`,
@@ -38,6 +38,10 @@ export function piAgent(opts) {
             ].join("\n"));
         },
         meta: (session) => ({ pi: { attach: shell(`exec dtach -a ${files(session).tty} -r winch -z`) } }),
+        stop(session) {
+            const f = files(session);
+            return shell(`${running(f.tty)} && kill "$(cat ${f.pid})"; true`);
+        },
         dispose(session, cwd) {
             const f = files(session);
             return shell([

@@ -140,9 +140,9 @@ export async function follow(c: AhpClient, uri: URI) {
   })();
   return chat;
 }
-export const until = async (check: () => boolean, ms = 15_000) => {
+export const until = async (check: () => boolean | Promise<boolean>, ms = 15_000) => {
   const end = Date.now() + ms;
-  while (!check()) {
+  while (!(await check())) {
     if (Date.now() > end) throw new Error("timed out");
     await new Promise((r) => setTimeout(r, 10));
   }
