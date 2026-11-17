@@ -50,6 +50,9 @@ type Asked = { turnId: string; options: acp.PermissionOption[]; answer: (respons
 // How long after its connection goes an agent that runs on its own is connected to again: doubling while it fails.
 const RECONNECT_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
+// AHP's SessionStatus: idle, and an error.
+const IDLE = 1;
+const ERROR = 2;
 
 const act = (action: object) => action as StateAction;
 const now = () => new Date().toISOString();
@@ -74,7 +77,7 @@ export class AcpChat {
   readonly provider: AcpProvider;
   readonly cwd: string;
   readonly given?: Record<string, unknown>;
-  readonly onStatus?: (status: number) => void;
+  readonly onStatus?: (status: number, activity?: string) => void;
   readonly onSession?: (sessionId: string) => Promise<void>;
   readonly onTitle?: (title: string) => void;
   readonly onTurn?: (turn: Shown, ids: string[]) => void;
@@ -88,6 +91,7 @@ export class AcpChat {
   #turn?: Turn;
   #stopped = false;
   #retry = RECONNECT_MS;
+  #errored = false;
   // Whether the chat has said the agent couldn't load its session.
   #forgot = false;
   // What session/load replays, while it does, and the ids of the agent's messages the chat has shown.
@@ -109,7 +113,7 @@ export class AcpChat {
     session?: string;
     transcript?: Transcript;
     paused?: boolean;
-    onStatus?: (status: number) => void;
+    onStatus?: (status: number, activity?: string) => void;
     onSession?: (sessionId: string) => Promise<void>;
     onTitle?: (title: string) => void;
     onTurn?: (turn: Shown, ids: string[]) => void;
@@ -146,9 +150,20 @@ export class AcpChat {
     if (!this.#stopped && (this.#session || this.provider.follow)) void this.#connect().catch((err: Error) => this.#failed(err));
   }
 
-  // A connection that failed, said in the chat, unless it was stopped on purpose.
+  // A connection that failed, said in the chat and as the session's status (AHP's error, the reason its activity),
+  // unless it was stopped on purpose.
   #failed(err: Error) {
-    if (!this.#stopped) this.#notice(err.message);
+    if (this.#stopped) return;
+    this.#errored = true;
+    this.#notice(err.message);
+    this.onStatus?.(ERROR, err.message);
+  }
+
+  // Connected: retries start over, and an error the session showed is over.
+  #up() {
+    this.#retry = RECONNECT_MS;
+    if (this.#errored) this.onStatus?.(IDLE);
+    this.#errored = false;
   }
 
   #dispatch(action: object) {
@@ -175,7 +190,9 @@ export class AcpChat {
       });
       ended.catch(() => {});
       child.once("exit", () => this.#gone(child));
-      const race = <T>(p: Promise<T>) => Promise.race([p, ended]);
+      // A request that fails as the agent exits (its stream closing first) fails with why it exited, if it does so soon.
+      const exited = (err: unknown) => Promise.race([ended.catch((e: unknown) => e), new Promise((r) => setTimeout(() => r(err), 1000))]);
+      const race = <T>(p: Promise<T>) => Promise.race([p, ended]).catch(async (err: unknown) => Promise.reject(await exited(err)));
       const { agent } = acp
         .client({ name: "pi-durable-ahp" })
         .onNotification(acp.methods.client.session.update, ({ params }) => this.#update(params))
@@ -207,7 +224,7 @@ export class AcpChat {
             if (shown.length) this.#dispatch({ type: "chat/turnsLoaded", turns: shown });
           } else shown.forEach((t) => this.#after(t));
           turns.forEach((t, i) => this.#kept(shown[i], t.ids));
-          this.#retry = RECONNECT_MS;
+          this.#up();
           return { agent, sessionId: before, steering };
         }
       }
@@ -218,7 +235,7 @@ export class AcpChat {
         this.#forgot = true;
         this.#notice(`${name} couldn't load what was said here before, so it starts afresh.`);
       }
-      this.#retry = RECONNECT_MS;
+      this.#up();
       return { agent, sessionId, steering };
     })().catch((err: unknown) => {
       this.#agent = undefined;

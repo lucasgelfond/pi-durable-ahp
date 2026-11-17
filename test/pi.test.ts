@@ -394,6 +394,51 @@ test("read (AHP's session/isReadChanged) is a flag on the session's status until
   await until(async () => ((await listed(s)).status & IS_READ) === 0);
 });
 
+test("a directory that is not a jj repo gets no workspaces folder beside it: pi works there as it is", async () => {
+  const plain = mkdtempSync(join(root, "plain-"));
+  const pi = piAgent({ dir: mkdtempSync(join(root, "files-")), pi: PI, workspaces: "{project}__workspaces" });
+  const host = await serve({ providers: [pi] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const id = randomUUID();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(plain).href] } as never);
+  const chat = (await follow(c.c, `ahp-chat:/${id}`)) as unknown as Chat;
+  c.c.dispatch(`ahp-chat:/${id}`, { type: "chat/turnStarted", turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: "hello", origin: { kind: "user" } } } as never);
+  await until(() => chat.state.turns.length === 1, 30_000);
+  const answer = said(chat.state.turns[0]);
+  const workspacesFolderMade = existsSync(`${plain}__workspaces`);
+  expect([answer, workspacesFolderMade]).toEqual(["echo: hello", false]);
+  c.ws.close();
+});
+
+test("a pi that can't start makes the session's status AHP's error, its reason the activity, as soon as it fails", async () => {
+  const repo = mkdtempSync(join(root, "repo-"));
+  run(repo, "jj", "git", "init", "--quiet");
+  const failing = join(root, "failing-pi");
+  writeFileSync(failing, '#!/bin/sh\necho "pi: no model configured" >&2\nexit 1\n', { mode: 0o755 });
+  const host = await serve({ providers: [piAgent({ dir: mkdtempSync(join(root, "files-")), pi: [failing] })] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const catalogue = await c.c.subscribe("ahp-root://");
+  const changes: { session: string; changes: { status?: number; activity?: string } }[] = [];
+  void (async () => {
+    for await (const event of catalogue.subscription) {
+      const e = event as { type: string; params?: (typeof changes)[number] };
+      if (e.type === "sessionSummaryChanged" && e.params) changes.push(e.params);
+    }
+  })();
+  const id = randomUUID();
+  const asked = Date.now();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(repo).href] } as never);
+  await until(() => changes.some((ch) => ch.session === `ahp-session:/${id}` && ((ch.changes.status ?? 0) & 2) !== 0), 30_000);
+  const failedAfterMs = Date.now() - asked;
+  const failure = changes.find((ch) => ch.session === `ahp-session:/${id}` && ((ch.changes.status ?? 0) & 2) !== 0)!;
+  expect(failure.changes.activity).toBe("pi exited (1): pi: no model configured");
+  // Its pi gives up at once: the session says so in seconds, not after the 30 s the socket is waited for.
+  expect(failedAfterMs).toBeLessThan(10_000);
+  c.ws.close();
+});
+
 test("`extensions` are loaded into every session's pi, beside its own", async () => {
   const extension = join(root, "marks.ts");
   writeFileSync(extension, 'import { writeFileSync } from "node:fs";\nexport default function () {\n  writeFileSync("marked by an extension", "");\n}\n');

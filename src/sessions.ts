@@ -220,13 +220,13 @@ export function durableAhp(opts: DurableAhpOptions) {
   const chats = new Map<URI, DurableChat | AcpChat>();
   // Each open session's other chats as last told, by key.
   const shown = new Map<string, Map<string, Chat>>();
-  const statusChanged = (session: string, uri: URI) => (status: number) => {
+  const statusChanged = (session: string, uri: URI) => (status: number, activity?: string) => {
     const at = new Date().toISOString();
     if (host.has(`${SESSION}${session}`)) host.dispatch(`${SESSION}${session}`, act({ type: "session/chatUpdated", chat: uri, changes: { status, modifiedAt: at } }));
-    if (uri === chatUri(session)) void summaryChanged(session, { status, modifiedAt: at }).catch(quiet);
+    if (uri === chatUri(session)) void summaryChanged(session, { status, modifiedAt: at, ...(activity && { activity }) }).catch(quiet);
   };
   // A session's summary changed, to every client: CHANGES, its status (an activity, or as it was) with its flags.
-  async function summaryChanged(session: string, changes: { status?: number; modifiedAt?: string; workingDirectories?: string[] } = {}) {
+  async function summaryChanged(session: string, changes: { status?: number; activity?: string; modifiedAt?: string; workingDirectories?: string[] } = {}) {
     const summary = (await catalogue()).find((s) => s.resource === `${SESSION}${session}`);
     if (!summary) return;
     const activity = changes.status ?? summary.status & ~(IS_READ | IS_ARCHIVED);
