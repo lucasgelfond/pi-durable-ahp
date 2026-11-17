@@ -317,6 +317,27 @@ test("a jj workspace given as the working directory is used as it is: no workspa
   c.ws.close();
 });
 
+test("a session can start at a revision (_meta.pi.revision): on another session's change, that session first moves to a new change on top of it", async () => {
+  const parent = await session();
+  writeFileSync(join(parent.files.workspace, "parent.txt"), "the parent's work\n");
+  run(parent.files.workspace, "jj", "describe", "--quiet", "-m", "parent");
+  const change = run(parent.files.workspace, "jj", "log", "--no-graph", "-r", "@", "-T", "change_id");
+
+  const id = randomUUID();
+  await parent.c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(parent.repo).href], _meta: { pi: { revision: change } } } as never);
+  await follow(parent.c.c, `ahp-chat:/${id}`);
+  await until(() => existsSync(join(parent.dir, "run", `${id}.sock`)), 30_000);
+  const child = join(parent.dir, "workspaces", id);
+
+  expect(readFileSync(join(child, "parent.txt"), "utf8")).toBe("the parent's work\n");
+  const childParent = run(child, "jj", "log", "--no-graph", "-r", "@-", "-T", "change_id");
+  expect(childParent).toBe(change);
+  // The parent works on a new, empty change on top of its own: its snapshots no longer rewrite what the child is on.
+  const parentNow = run(parent.files.workspace, "jj", "log", "--no-graph", "-r", "@", "-T", 'change_id ++ " " ++ empty ++ " " ++ parents.map(|p| p.change_id()).join(",")');
+  expect(parentNow.split(" ").slice(1)).toEqual(["true", change]);
+  expect(readFileSync(join(parent.files.workspace, "parent.txt"), "utf8")).toBe("the parent's work\n");
+});
+
 test("archiving (AHP's session/isArchivedChanged) stops pi and keeps the session, its file and workspace; a host started meanwhile leaves it stopped; bringing it back starts pi on the same session", async () => {
   const s = await session();
   s.prompt("before the archive");
@@ -370,6 +391,25 @@ test("read (AHP's session/isReadChanged) is a flag on the session's status until
   s.prompt("now unread");
   await until(() => s.chat.state.turns.length === 2, 30_000);
   await until(async () => ((await listed(s)).status & IS_READ) === 0);
+});
+
+test("`extensions` are loaded into every session's pi, beside its own", async () => {
+  const extension = join(root, "marks.ts");
+  writeFileSync(extension, 'import { writeFileSync } from "node:fs";\nexport default function () {\n  writeFileSync("marked by an extension", "");\n}\n');
+  const repo = mkdtempSync(join(root, "repo-"));
+  run(repo, "jj", "git", "init", "--quiet");
+  const dir = mkdtempSync(join(root, "files-"));
+  const host = await serve({ providers: [piAgent({ dir, pi: PI, extensions: [extension] })] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const id = randomUUID();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(repo).href] } as never);
+  const chat = (await follow(c.c, `ahp-chat:/${id}`)) as unknown as Chat;
+  c.c.dispatch(`ahp-chat:/${id}`, { type: "chat/turnStarted", turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: "hello", origin: { kind: "user" } } } as never);
+  await until(() => chat.state.turns.length === 1, 30_000);
+  const marked = existsSync(join(dir, "workspaces", id, "marked by an extension"));
+  expect([said(chat.state.turns[0]), marked]).toEqual(["echo: hello", true]);
+  c.ws.close();
 });
 
 test("deleting the session ends its pi and forgets its workspace", async () => {

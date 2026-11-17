@@ -28,8 +28,9 @@ export interface AcpProvider {
   command?: string;
   args?: string[];
   env?: Record<string, string>;
-  // ...or the command line that reaches the session's agent wherever it runs (pi.ts: its pi, started if need be).
-  connect?(session: string, cwd: string): string[];
+  // ...or the command line that reaches the session's agent wherever it runs (pi.ts: its pi, started if need be), with
+  // the _meta its creator gave the session.
+  connect?(session: string, cwd: string, given?: Record<string, unknown>): string[];
   follow?: boolean;
   // The session's _meta of the agent's own (pi.ts: how to open its terminal).
   meta?(session: string): Record<string, unknown>;
@@ -72,6 +73,7 @@ export class AcpChat {
   readonly uri: URI;
   readonly provider: AcpProvider;
   readonly cwd: string;
+  readonly given?: Record<string, unknown>;
   readonly onStatus?: (status: number) => void;
   readonly onSession?: (sessionId: string) => Promise<void>;
   readonly onTitle?: (title: string) => void;
@@ -103,6 +105,7 @@ export class AcpChat {
     key: string;
     provider: AcpProvider;
     cwd: string;
+    given?: Record<string, unknown>;
     session?: string;
     transcript?: Transcript;
     paused?: boolean;
@@ -117,6 +120,7 @@ export class AcpChat {
     this.key = opts.key;
     this.provider = opts.provider;
     this.cwd = opts.cwd;
+    this.given = opts.given;
     this.#session = opts.session;
     this.#transcript = opts.transcript?.turns ?? [];
     this.#seen = new Set(opts.transcript?.ids);
@@ -160,7 +164,7 @@ export class AcpChat {
   #connect() {
     this.#agent ??= (async () => {
       const name = this.provider.displayName;
-      const [command, ...args] = this.provider.connect?.(this.key, this.cwd) ?? [this.provider.command!, ...(this.provider.args ?? [])];
+      const [command, ...args] = this.provider.connect?.(this.key, this.cwd, this.given) ?? [this.provider.command!, ...(this.provider.args ?? [])];
       const child = spawn(command, args, { ...(!this.provider.connect && { cwd: this.cwd }), env: { ...process.env, ...this.provider.env }, stdio: ["pipe", "pipe", "pipe"] });
       this.#child = child;
       child.stderr!.setEncoding("utf8").on("data", (d: string) => (this.#stderr = (this.#stderr + d).slice(-2000)));

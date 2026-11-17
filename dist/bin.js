@@ -20,6 +20,7 @@ import { durableAhp } from "./sessions.js";
 // agent's process is started (npx fetching it, the first time) only once one of its sessions is used.
 //
 //   pi-durable-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
+//     [--extension FILE]...   (more pi extensions for every session's pi)
 //
 // The config, JSON: { "providers": [{ "id", "displayName", "command", "args"?, "env"? }], "pi"?: { "provider", "modelId" },
 // "piCommand"?: ["pi", …], "piWorkspaces"?: "{project}__workspaces" }. pi in its own terminal ("pi") is always there; beside it the config's providers, or
@@ -35,12 +36,13 @@ const { values: args } = parseArgs({
         socket: { type: "string", default: join(home, "host.sock") },
         db: { type: "string", default: join(home, "host.db") },
         port: { type: "string" },
+        extension: { type: "string", multiple: true },
     },
 });
 const config = (existsSync(args.config) ? JSON.parse(readFileSync(args.config, "utf8")) : {});
 // pi on PATH (or the config's piCommand), in a terminal of its own (pi.ts), its files beside the database, its
 // workspaces beside the repo (or the config's piWorkspaces).
-const tui = piAgent({ dir: dirname(args.db), pi: config.piCommand, workspaces: config.piWorkspaces ?? "{project}__workspaces" });
+const tui = piAgent({ dir: dirname(args.db), pi: config.piCommand, extensions: args.extension, workspaces: config.piWorkspaces ?? "{project}__workspaces" });
 const ctx = BACKGROUND_CONTEXT;
 mkdirSync(dirname(args.db), { recursive: true });
 const registry = createRegistry();

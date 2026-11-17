@@ -2,10 +2,15 @@ import { fileURLToPath } from "node:url";
 const EXTENSION = fileURLToPath(new URL("../pi/acp.ts", import.meta.url));
 // The longest path a Unix socket can have (macOS's; Linux allows 107).
 const SOCKET_MAX = 103;
+// The revision a session's creator asked its workspace to start at (_meta.pi.revision, a jj revset).
+const revisionOf = (given) => {
+    const pi = given?.pi;
+    return pi && typeof pi === "object" && "revision" in pi && typeof pi.revision === "string" ? pi.revision : undefined;
+};
 const quote = (s) => `'${s.replaceAll("'", `'\\''`)}'`;
 export function piAgent(opts) {
     const shell = opts.shell ?? ((script) => ["sh", "-c", script]);
-    const command = [...(opts.pi ?? ["pi"]), "-e", opts.extension ?? EXTENSION].map(quote).join(" ");
+    const command = [...(opts.pi ?? ["pi"]), ...[opts.extension ?? EXTENSION, ...(opts.extensions ?? [])].flatMap((e) => ["-e", e])].map(quote).join(" ");
     // A session's files there, quoted for its scripts (its workspace's for the directory it was given, CWD).
     const files = (session, cwd = "") => {
         const run = `${opts.dir}/run/${session}`;
@@ -20,16 +25,29 @@ export function piAgent(opts) {
         displayName: opts.displayName ?? "pi",
         description: "pi in its own terminal",
         follow: true,
-        connect(session, cwd) {
+        connect(session, cwd, given) {
             const socket = `${opts.dir}/run/${session}.sock`;
             if (Buffer.byteLength(socket) > SOCKET_MAX)
                 throw new Error(`${socket} is too long for a Unix socket: give pi a shorter dir than ${opts.dir}`);
             const f = files(session, cwd);
+            const revision = revisionOf(given);
             return shell([
                 "set -e",
                 `mkdir -p ${f.run} ${f.workspaces}`,
                 `cd ${quote(cwd)}`,
-                `if [ -d .jj/repo ]; then [ -d ${f.workspace} ] || jj workspace add --quiet --name ${quote(session)} ${f.workspace}; cd ${f.workspace}; fi`,
+                "if [ -d .jj/repo ]; then",
+                `  if [ ! -d ${f.workspace} ]; then`,
+                ...(revision === undefined
+                    ? [`    jj workspace add --quiet --name ${quote(session)} ${f.workspace}`]
+                    : [
+                        // A workspace working on that revision moves off it first (onto a new change of its own on top), or
+                        // each of its snapshots would rewrite the revision under this one.
+                        `    for w in $(jj log --no-graph -r ${quote(revision)} -T working_copies); do (cd "$(jj workspace root --name "\${w%@}")" && jj new --quiet); done`,
+                        `    jj workspace add --quiet --name ${quote(session)} -r ${quote(revision)} ${f.workspace}`,
+                    ]),
+                "  fi",
+                `  cd ${f.workspace}`,
+                "fi",
                 `if ! ${running(f.tty)}; then`,
                 `  rm -f ${f.acp} ${f.tty}`,
                 `  PI_ACP_SOCKET=${f.acp} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; exec ${command} --session-id ${quote(session)}`)}`,

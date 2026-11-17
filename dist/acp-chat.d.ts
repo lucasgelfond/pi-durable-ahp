@@ -7,7 +7,7 @@ export interface AcpProvider {
     command?: string;
     args?: string[];
     env?: Record<string, string>;
-    connect?(session: string, cwd: string): string[];
+    connect?(session: string, cwd: string, given?: Record<string, unknown>): string[];
     follow?: boolean;
     meta?(session: string): Record<string, unknown>;
     stop?(session: string, cwd: string): string[];
@@ -34,6 +34,7 @@ export declare class AcpChat {
     readonly uri: URI;
     readonly provider: AcpProvider;
     readonly cwd: string;
+    readonly given?: Record<string, unknown>;
     readonly onStatus?: (status: number) => void;
     readonly onSession?: (sessionId: string) => Promise<void>;
     readonly onTitle?: (title: string) => void;
@@ -46,6 +47,7 @@ export declare class AcpChat {
         key: string;
         provider: AcpProvider;
         cwd: string;
+        given?: Record<string, unknown>;
         session?: string;
         transcript?: Transcript;
         paused?: boolean;

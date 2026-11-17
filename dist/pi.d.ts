@@ -6,6 +6,7 @@ export interface PiOptions {
     workspaces?: string;
     pi?: string[];
     extension?: string;
+    extensions?: string[];
     shell?: (script: string) => string[];
 }
 export declare function piAgent(opts: PiOptions): AcpProvider;

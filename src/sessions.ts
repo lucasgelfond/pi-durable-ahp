@@ -265,6 +265,7 @@ export function durableAhp(opts: DurableAhpOptions) {
       key: session,
       provider,
       cwd: doc.dirs[session] ?? process.cwd(),
+      ...(doc.meta[session] && { given: JSON.parse(doc.meta[session]) as Record<string, unknown> }),
       session: doc.acp[session] || undefined,
       transcript: transcript && JSON.parse(JSON.stringify(transcript)),
       // An archived session's agent stays stopped until it's wanted.

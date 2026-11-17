@@ -27,6 +27,7 @@ export class AcpChat {
     uri;
     provider;
     cwd;
+    given;
     onStatus;
     onSession;
     onTitle;
@@ -57,6 +58,7 @@ export class AcpChat {
         this.key = opts.key;
         this.provider = opts.provider;
         this.cwd = opts.cwd;
+        this.given = opts.given;
         this.#session = opts.session;
         this.#transcript = opts.transcript?.turns ?? [];
         this.#seen = new Set(opts.transcript?.ids);
@@ -97,7 +99,7 @@ export class AcpChat {
     #connect() {
         this.#agent ??= (async () => {
             const name = this.provider.displayName;
-            const [command, ...args] = this.provider.connect?.(this.key, this.cwd) ?? [this.provider.command, ...(this.provider.args ?? [])];
+            const [command, ...args] = this.provider.connect?.(this.key, this.cwd, this.given) ?? [this.provider.command, ...(this.provider.args ?? [])];
             const child = spawn(command, args, { ...(!this.provider.connect && { cwd: this.cwd }), env: { ...process.env, ...this.provider.env }, stdio: ["pipe", "pipe", "pipe"] });
             this.#child = child;
             child.stderr.setEncoding("utf8").on("data", (d) => (this.#stderr = (this.#stderr + d).slice(-2000)));
