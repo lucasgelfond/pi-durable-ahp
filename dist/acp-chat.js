@@ -2,10 +2,16 @@ import { spawn } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 import { chatState } from "./chat.js";
+// How long after its connection goes an agent that runs on its own is connected to again: doubling while it fails.
+const RECONNECT_MS = 1000;
+const RECONNECT_MAX_MS = 30_000;
 const act = (action) => action;
 const now = () => new Date().toISOString();
 const textOf = (c) => (c?.type === "text" ? (c.text ?? "") : "");
 const json = (v) => (v === undefined ? undefined : JSON.stringify(v));
+// The id of the agent's message an update is part of, if it gives one; added to a turn's once.
+const messageIdOf = (u) => ("messageId" in u ? (u.messageId ?? undefined) : undefined);
+const noted = (ids, id) => void (id && !ids.includes(id) && ids.push(id));
 const approves = (o) => o.kind.startsWith("allow");
 // A tool call's content as AHP text: what it said, and each file it changed.
 const shownContent = (content) => (content ?? []).flatMap((c) => {
@@ -24,36 +30,52 @@ export class AcpChat {
     onStatus;
     onSession;
     onTitle;
+    onTurn;
+    // The host's session this chat is.
+    key;
     #session;
     #agent;
     #child;
     #stderr = "";
     #turn;
-    // What session/load replays, while it does; and whether the chat has shown it (once a process).
+    #stopped = false;
+    #retry = RECONNECT_MS;
+    // Whether the chat has said the agent couldn't load its session.
+    #forgot = false;
+    // What session/load replays, while it does, and the ids of the agent's messages the chat has shown.
     #loading;
     #lastWasUser = false;
-    #shown = false;
+    #seen;
+    #transcript;
     #asked = new Map();
     // Clients' messages for after the turn under way: queued ones, and steering for an agent that can't take it.
     #queue = [];
     constructor(opts) {
         this.host = opts.host;
         this.uri = opts.uri;
+        this.key = opts.key;
         this.provider = opts.provider;
         this.cwd = opts.cwd;
         this.#session = opts.session;
+        this.#transcript = opts.transcript?.turns ?? [];
+        this.#seen = new Set(opts.transcript?.ids);
         this.onStatus = opts.onStatus;
         this.onSession = opts.onSession;
         this.onTitle = opts.onTitle;
+        this.onTurn = opts.onTurn;
     }
     get running() {
         return this.#turn !== undefined;
     }
-    // The chat's channel, at once; a session the agent had before is loaded behind it, its turns put ahead of any since.
+    // The chat's channel, at once, with what it said before; then the agent (an agent that runs on its own, at once; a
+    // session the agent had before, loaded behind it).
     open(title, meta) {
-        if (!this.host.has(this.uri))
+        if (!this.host.has(this.uri)) {
             this.host.create(this.uri, chatState(this.uri, title, meta));
-        if (this.#session)
+            if (this.#transcript.length)
+                this.#dispatch({ type: "chat/turnsLoaded", turns: this.#transcript });
+        }
+        if (this.#session || this.provider.follow)
             void this.#connect().catch((err) => this.#notice(err.message));
     }
     #dispatch(action) {
@@ -67,7 +89,8 @@ export class AcpChat {
     #connect() {
         this.#agent ??= (async () => {
             const name = this.provider.displayName;
-            const child = spawn(this.provider.command, this.provider.args ?? [], { cwd: this.cwd, env: { ...process.env, ...this.provider.env }, stdio: ["pipe", "pipe", "pipe"] });
+            const [command, ...args] = this.provider.connect?.(this.key, this.cwd) ?? [this.provider.command, ...(this.provider.args ?? [])];
+            const child = spawn(command, args, { ...(!this.provider.connect && { cwd: this.cwd }), env: { ...process.env, ...this.provider.env }, stdio: ["pipe", "pipe", "pipe"] });
             this.#child = child;
             child.stderr.setEncoding("utf8").on("data", (d) => (this.#stderr = (this.#stderr + d).slice(-2000)));
             const why = () => (this.#stderr.trim() ? `: ${this.#stderr.trim().split("\n").at(-1)}` : "");
@@ -85,32 +108,58 @@ export class AcpChat {
                 .connect(acp.ndJsonStream(Writable.toWeb(child.stdin), Readable.toWeb(child.stdout)));
             const init = await race(agent.request(acp.methods.agent.initialize, { protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }));
             const steering = Boolean(init.agentCapabilities?._meta?.steering?.supported);
+            // An agent that is one running session: that one.
+            if (!this.#session && this.provider.follow)
+                this.#session = (await race(agent.request(acp.methods.agent.session.list, {}))).sessions[0]?.sessionId;
             const before = this.#session;
             if (before && init.agentCapabilities?.loadSession) {
                 this.#loading = [];
                 const loaded = await race(agent.request(acp.methods.agent.session.load, { sessionId: before, cwd: this.cwd, mcpServers: [] })).then(() => true, () => false);
-                const turns = this.#loading;
+                // Turns the chat hasn't shown: by their messages' ids, or (an agent that gives none) all of them, once.
+                const fresh = !this.#transcript.length;
+                const turns = this.#loading.filter((t) => (t.ids.length ? !t.ids.some((id) => this.#seen.has(id)) : fresh));
                 this.#loading = undefined;
                 if (loaded) {
-                    if (!this.#shown && turns.length)
-                        this.#dispatch({ type: "chat/turnsLoaded", turns });
-                    this.#shown = true;
+                    const shown = turns.map(({ ids: _, ...t }) => t);
+                    // A chat showing nothing yet loads them all; one showing turns gets them after those.
+                    if (fresh || this.host.get(this.uri)?.activeTurn) {
+                        if (shown.length)
+                            this.#dispatch({ type: "chat/turnsLoaded", turns: shown });
+                    }
+                    else
+                        shown.forEach((t) => this.#after(t));
+                    turns.forEach((t, i) => this.#kept(shown[i], t.ids));
+                    this.#retry = RECONNECT_MS;
                     return { agent, sessionId: before, steering };
                 }
             }
             const { sessionId } = await race(agent.request(acp.methods.agent.session.new, { cwd: this.cwd, mcpServers: [] }));
             this.#session = sessionId;
             await this.onSession?.(sessionId);
-            if (before && !this.#shown)
+            if (before && !this.#forgot) {
+                this.#forgot = true;
                 this.#notice(`${name} couldn't load what was said here before, so it starts afresh.`);
-            this.#shown = true;
+            }
+            this.#retry = RECONNECT_MS;
             return { agent, sessionId, steering };
         })().catch((err) => {
             this.#agent = undefined;
             this.#child?.kill();
+            this.#again();
             throw err;
         });
         return this.#agent;
+    }
+    // An agent that runs on its own is connected to again after its connection goes.
+    #again() {
+        if (!this.provider.follow || this.#stopped)
+            return;
+        const wait = this.#retry;
+        this.#retry = Math.min(wait * 2, RECONNECT_MAX_MS);
+        setTimeout(() => {
+            if (!this.#agent && !this.#stopped)
+                void this.#connect().catch((err) => console.error(`pi-durable-ahp: ${this.provider.displayName}: ${err.message}`));
+        }, wait).unref();
     }
     // The agent's process ended: anything waiting on it is answered, and the next use starts it again.
     #gone(child) {
@@ -123,16 +172,44 @@ export class AcpChat {
         this.#asked.clear();
         if (this.#turn)
             this.#end(this.#turn.id, "error", `${this.provider.displayName} exited${this.#stderr.trim() ? `: ${this.#stderr.trim().split("\n").at(-1)}` : ""}`);
+        this.#again();
+    }
+    // A finished turn the chat hasn't shown, after the turns it shows: as that turn's own actions (turnsLoaded would put it
+    // before them).
+    #after(t) {
+        const turnId = t.id;
+        this.#dispatch({ type: "chat/turnStarted", turnId, startedAt: now(), message: t.message });
+        for (const part of t.responseParts) {
+            const call = part.toolCall;
+            if (!call) {
+                this.#dispatch({ type: "chat/responsePart", turnId, part });
+                continue;
+            }
+            const base = { turnId, toolCallId: call.toolCallId, _meta: call._meta };
+            this.#dispatch({ type: "chat/toolCallStart", ...base, toolName: call.toolName, displayName: call.displayName });
+            this.#dispatch({ type: "chat/toolCallReady", ...base, invocationMessage: call.invocationMessage, toolInput: call.toolInput, confirmed: "not-needed" });
+            this.#dispatch({ type: "chat/toolCallComplete", ...base, result: { success: call.success, pastTenseMessage: call.pastTenseMessage, content: call.content ?? [] } });
+        }
+        this.#dispatch({ type: "chat/turnComplete", turnId, duration: 0 });
+    }
+    // A finished turn, and the ids of its messages: shown, and the caller's to keep.
+    #kept(turn, ids) {
+        for (const id of ids)
+            this.#seen.add(id);
+        this.#transcript.push(turn);
+        this.onTurn?.(turn, ids);
     }
     // What session/load replays: each message the user sent starts a turn, and what came after it is its answer.
     #replayed(u) {
         const turns = this.#loading;
+        const id = messageIdOf(u);
         if (u.sessionUpdate === "user_message_chunk") {
             const last = turns.at(-1);
             if (last && this.#lastWasUser)
                 last.message.text += textOf(u.content);
             else
-                turns.push({ id: `${this.#session}:${turns.length}`, message: { text: textOf(u.content), origin: { kind: "user" } }, responseParts: [], state: "complete" });
+                turns.push({ id: id ?? `${this.#session}:${turns.length}`, message: { text: textOf(u.content), origin: { kind: "user" } }, responseParts: [], state: "complete", ids: [] });
+            noted(turns.at(-1).ids, id);
             this.#lastWasUser = true;
             return;
         }
@@ -140,6 +217,7 @@ export class AcpChat {
         const turn = turns.at(-1);
         if (!turn)
             return;
+        noted(turn.ids, id);
         const parts = turn.responseParts;
         if (u.sessionUpdate === "agent_message_chunk" || u.sessionUpdate === "agent_thought_chunk") {
             const kind = u.sessionUpdate === "agent_message_chunk" ? "markdown" : "reasoning";
@@ -173,11 +251,22 @@ export class AcpChat {
         const u = n.update;
         if (this.#loading)
             return this.#replayed(u);
-        if (u.sessionUpdate === "session_info_update" && u.title)
-            return this.onTitle?.(u.title);
+        if (u.sessionUpdate === "session_info_update") {
+            if (u.title)
+                this.onTitle?.(u.title);
+            // The agent is idle again: a turn started in its terminal is over.
+            if (this.#turn?.theirs && u._meta?.pi?.state === "idle")
+                this.#end(this.#turn.id, "complete");
+            return;
+        }
+        const id = messageIdOf(u);
+        // Someone typed into the agent's own terminal: a turn of theirs.
+        if (!this.#turn && this.provider.follow && u.sessionUpdate === "user_message_chunk" && !(id && this.#seen.has(id)))
+            this.#theirs(id ?? `turn-${Date.now()}`, textOf(u.content));
         const turn = this.#turn;
         if (!turn || turn.cancelled)
             return;
+        noted(turn.ids, id);
         switch (u.sessionUpdate) {
             case "agent_message_chunk":
                 return this.#text(turn, "markdown", textOf(u.content));
@@ -287,9 +376,15 @@ export class AcpChat {
             c.ready = true;
         a.answer(o ? { outcome: { outcome: "selected", optionId: o.optionId } } : { outcome: { outcome: "cancelled" } });
     }
+    // A turn started in the agent's own terminal, shown as if a client had started it.
+    #theirs(turnId, text) {
+        this.#turn = { id: turnId, started: Date.now(), calls: new Map(), theirs: true, ids: [] };
+        this.#dispatch({ type: "chat/turnStarted", turnId, startedAt: now(), message: { text, origin: { kind: "user" } } });
+        this.onStatus?.(8);
+    }
     // A client started a turn (its action is committed already): the agent's prompt, answered when the agent stops.
     async started(turnId, text) {
-        this.#turn = { id: turnId, started: Date.now(), calls: new Map() };
+        this.#turn = { id: turnId, started: Date.now(), calls: new Map(), ids: [] };
         this.onStatus?.(8);
         try {
             const { agent, sessionId } = await this.#connect();
@@ -320,6 +415,9 @@ export class AcpChat {
             else
                 this.#dispatch({ type: "chat/error", turnId, duration, part: { kind: "error", error: { errorType: "acp", message: why ?? "the agent failed" } } });
         }
+        const shown = this.host.get(this.uri)?.turns.find((t) => t.id === turnId);
+        if (shown)
+            this.#kept(shown, turn.ids);
         this.onStatus?.(1);
         const next = this.#queue.shift();
         if (next)
@@ -366,8 +464,9 @@ export class AcpChat {
         if (agent)
             await agent.agent.notify(acp.methods.agent.session.cancel, { sessionId: agent.sessionId }).catch(() => { });
     }
-    // The agent's process stopped (the session deleted, or the host closing).
+    // The connection to the agent stopped (the session deleted, or the host closing).
     stop() {
+        this.#stopped = true;
         const child = this.#child;
         this.#child = undefined;
         this.#agent = undefined;

@@ -2,6 +2,18 @@
   "name": "pi-durable-ahp",
   "version": "0.1.0",
   "description": "The Agent Host Protocol for pi-durable: each conversation a session, its subagents chats beside it, ACP agents (Claude Code, Gemini CLI) as sessions too, and pi's own TUI as a session anyone can attach to",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lucasgelfond/pi-durable-ahp.git"
+  },
+  "keywords": [
+    "pi",
+    "agent-host-protocol",
+    "ahp",
+    "acp",
+    "agents"
+  ],
   "type": "module",
   "exports": {
     ".": {
@@ -12,7 +24,9 @@
   "files": [
     "dist",
     "src",
-    "pi"
+    "pi",
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",

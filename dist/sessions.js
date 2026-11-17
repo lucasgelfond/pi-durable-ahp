@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { defineDoc } from "@earendil-works/pi-durable";
+import { defineDoc, defineDocFamily } from "@earendil-works/pi-durable";
 import { WebSocketServer } from "ws";
 import { chatState, DurableChat } from "./chat.js";
 import { AcpChat } from "./acp-chat.js";
@@ -23,6 +24,16 @@ const Sessions = defineDoc({
     initial: empty,
     checkpointWhen: () => true,
 });
+// An ACP agent's session's transcript: each finished turn as clients saw it, there when the agent isn't (a box asleep or
+// gone), and the ids of the agent's messages in them, so what it replays isn't shown twice.
+const Transcripts = defineDocFamily({
+    kind: "pi-durable-ahp.transcript",
+    version: 1,
+    scope: "session",
+    family: true,
+    initial: () => ({ turns: [], ids: [] }),
+    checkpointWhen: (_value, _ops, info) => info.deltasSinceBase >= 50,
+});
 export function durableAhp(opts) {
     const ctx = opts.context;
     const named = opts.named ?? ((id) => id);
@@ -44,7 +55,8 @@ export function durableAhp(opts) {
     const chatUri = (session, key) => `${CHAT}${session}${key === undefined ? "" : `/${key}`}`;
     const titleOf = (session, doc) => opts.title?.(session) ?? doc.titles[session] ?? "New session";
     const metaOf = (session, doc) => {
-        const own = opts.meta?.(session);
+        const agent = providerOf(session, doc)?.meta?.(session);
+        const own = agent || opts.meta ? { ...agent, ...opts.meta?.(session) } : undefined;
         const given = doc.meta[session] ? JSON.parse(doc.meta[session]) : undefined;
         if (!own && !given)
             return undefined;
@@ -148,24 +160,36 @@ export function durableAhp(opts) {
         await chat.open(title, meta);
     }
     const conversationOf = async (c) => (c.conversation === undefined ? undefined : await harness().conversation(c.conversation, ctx));
-    // An ACP agent's session's chat: the agent's process, started when it's needed.
-    function openAgent(session, provider, doc) {
+    // An ACP agent's session's chat: the agent's process, started when it's needed, and what it said before.
+    async function openAgent(session, provider, doc) {
         const uri = chatUri(session);
+        if (chats.has(uri))
+            return;
+        const transcript = await harness().snapshot(Transcripts, session, ctx);
         if (chats.has(uri))
             return;
         const chat = new AcpChat({
             host,
             uri,
+            key: session,
             provider,
             cwd: doc.dirs[session] ?? process.cwd(),
             session: doc.acp[session] || undefined,
+            transcript: transcript && JSON.parse(JSON.stringify(transcript)),
             onStatus: statusChanged(session, uri),
             onSession: (id) => update((d) => void (d.acp[session] = id)).then(() => { }),
             onTitle: (t) => void retitle(session, uri, t).catch(quiet),
+            onTurn: (turn, ids) => void keep(session, turn, ids).catch(quiet),
         });
         chats.set(uri, chat);
         chat.open(titleOf(session, doc));
     }
+    const keep = (session, turn, ids) => harness().commit(async (tx) => {
+        const t = await tx.doc(Transcripts, session, null);
+        const json = JSON.parse(JSON.stringify(turn));
+        t.turns.push(json);
+        t.ids.push(...ids);
+    }, ctx);
     // Opened once, however many ask at once (a client subscribing as `committed` opens it).
     const opening = new Map();
     function openSession(session) {
@@ -189,7 +213,7 @@ export function durableAhp(opts) {
         const meta = metaOf(session, doc);
         host.create(uri, { provider: providerName(session, doc), ...dirsOf(session, doc), title, status: IDLE, lifecycle: "ready", activeClients: [], chats: [], ...(meta && { _meta: meta }) });
         if (provider)
-            openAgent(session, provider, doc);
+            await openAgent(session, provider, doc);
         else
             await openChat(session, chatUri(session), title, handle);
         host.dispatch(uri, act({ type: "session/chatAdded", summary: { resource: chatUri(session), title, status: IDLE, modifiedAt: new Date().toISOString(), origin: { kind: "user" } } }));
@@ -288,8 +312,15 @@ export function durableAhp(opts) {
             if (!session || !(session in doc.ids))
                 throw new Error(`no session ${uri}`);
             const own = chats.get(chatUri(session));
+            const provider = providerOf(session, doc);
             if (own instanceof AcpChat)
                 own.stop();
+            if (provider) {
+                const [command, ...args] = provider.dispose?.(session, doc.dirs[session] ?? process.cwd()) ?? [];
+                if (command)
+                    await new Promise((done) => spawn(command, args, { stdio: "ignore" }).once("exit", done).once("error", done));
+                await harness().commit(async (tx) => void Object.assign(await tx.doc(Transcripts, session, null), { turns: [], ids: [] }), ctx);
+            }
             else
                 await (await conversation(session)).abort(ctx).catch(() => { });
             await update((d) => {
