@@ -105,13 +105,14 @@ test.for(places)("a pi session $place: a client's prompt is pi's turn, its tool 
   expect([header.id, header.cwd.endsWith(`/workspaces/${s.id}`)]).toEqual([s.id, true]);
 });
 
-test.for(places)("the session's _meta says how to open pi's terminal $place, and opening it shows the same pi", async ({ shell }) => {
+test.for(places)("the session's _meta says how to open pi's terminal $place (once pi is up), and opening it shows the same pi", async ({ shell }) => {
   const s = await session(shell);
   s.prompt("shown in the terminal");
   await until(() => s.chat.state.turns.length === 1, 30_000);
   const { items } = await s.c.c.request("listSessions", { channel: "ahp-root://" });
   const attach = (items.find((i) => i.resource === `ahp-session:/${s.id}`)?._meta as { pi?: { attach?: string[] } } | undefined)?.pi?.attach;
-  const expected = shell ? shell(`exec dtach -a '${s.files.tty}' -r winch -z`) : ["sh", "-c", `exec dtach -a '${s.files.tty}' -r winch -z`];
+  const script = `i=0; until [ -S '${s.files.acp}' ] || [ $i -ge 600 ]; do i=$((i+1)); sleep 0.05; done; exec dtach -a '${s.files.tty}' -r winch -z`;
+  const expected = shell ? shell(script) : ["sh", "-c", script];
   expect(attach).toEqual(expected);
 
   // In a terminal of its own, 120 by 40, as a client's pane would be: pi redraws for it.

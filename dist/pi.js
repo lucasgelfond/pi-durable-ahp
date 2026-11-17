@@ -56,7 +56,12 @@ export function piAgent(opts) {
                 `exec nc -U ${f.acp}`,
             ].join("\n"));
         },
-        meta: (session) => ({ pi: { attach: shell(`exec dtach -a ${files(session).tty} -r winch -z`) } }),
+        // Its terminal, once its pi is up (its ACP socket there): a client that attaches as pi starts misses pi's first
+        // drawing, and pi draws again only when its size changes.
+        meta: (session) => {
+            const f = files(session);
+            return { pi: { attach: shell(`i=0; until [ -S ${f.acp} ] || [ $i -ge 600 ]; do i=$((i+1)); sleep 0.05; done; exec dtach -a ${f.tty} -r winch -z`) } };
+        },
         stop(session) {
             const f = files(session);
             return shell(`${running(f.tty)} && kill "$(cat ${f.pid})"; true`);
