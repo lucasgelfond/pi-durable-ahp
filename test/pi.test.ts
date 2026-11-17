@@ -280,6 +280,23 @@ test.for(places)("$place: the session works in its own workspace (as pi says), a
   expect(summary.project).toEqual({ uri: pathToFileURL(s.repo).href, displayName: basename(s.repo) });
 });
 
+test("workspaces go where `workspaces` says ({project}: the repo the session was given), and deleting one removes it there", async () => {
+  const repo = mkdtempSync(join(root, "repo-"));
+  run(repo, "jj", "git", "init", "--quiet");
+  const pi = piAgent({ dir: mkdtempSync(join(root, "files-")), pi: PI, workspaces: "{project}__workspaces" });
+  const host = await serve({ providers: [pi] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const id = randomUUID();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(repo).href] } as never);
+  const workspace = `${repo}__workspaces/${id}`;
+  await until(async () => (await listed({ c, id })).workingDirectories?.[0] === pathToFileURL(realpathSync(repo) + `__workspaces/${id}`).href, 30_000);
+  expect(existsSync(workspace)).toBe(true);
+  await c.c.request("disposeSession", { channel: `ahp-session:/${id}` } as never);
+  expect(existsSync(workspace)).toBe(false);
+  c.ws.close();
+});
+
 test("a jj workspace given as the working directory is used as it is: no workspace inside it", async () => {
   const repo = mkdtempSync(join(root, "repo-"));
   run(repo, "jj", "git", "init", "--quiet");

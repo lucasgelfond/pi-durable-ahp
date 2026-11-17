@@ -6,10 +6,11 @@ const quote = (s) => `'${s.replaceAll("'", `'\\''`)}'`;
 export function piAgent(opts) {
     const shell = opts.shell ?? ((script) => ["sh", "-c", script]);
     const command = [...(opts.pi ?? ["pi"]), "-e", opts.extension ?? EXTENSION].map(quote).join(" ");
-    // A session's files there, quoted for its scripts.
-    const files = (session) => {
+    // A session's files there, quoted for its scripts (its workspace's for the directory it was given, CWD).
+    const files = (session, cwd = "") => {
         const run = `${opts.dir}/run/${session}`;
-        return { run: quote(`${opts.dir}/run`), workspaces: quote(`${opts.dir}/workspaces`), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), workspace: quote(`${opts.dir}/workspaces/${session}`) };
+        const workspaces = (opts.workspaces ?? `${opts.dir}/workspaces`).replaceAll("{project}", cwd);
+        return { run: quote(`${opts.dir}/run`), workspaces: quote(workspaces), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), workspace: quote(`${workspaces}/${session}`) };
     };
     // Whether the session's pi is running: its terminal's socket takes a connection (one left by a crash or a reboot
     // doesn't, and a pid may have been reused since).
@@ -23,7 +24,7 @@ export function piAgent(opts) {
             const socket = `${opts.dir}/run/${session}.sock`;
             if (Buffer.byteLength(socket) > SOCKET_MAX)
                 throw new Error(`${socket} is too long for a Unix socket: give pi a shorter dir than ${opts.dir}`);
-            const f = files(session);
+            const f = files(session, cwd);
             return shell([
                 "set -e",
                 `mkdir -p ${f.run} ${f.workspaces}`,
@@ -43,7 +44,7 @@ export function piAgent(opts) {
             return shell(`${running(f.tty)} && kill "$(cat ${f.pid})"; true`);
         },
         dispose(session, cwd) {
-            const f = files(session);
+            const f = files(session, cwd);
             return shell([
                 `${running(f.tty)} && kill "$(cat ${f.pid})"`,
                 `rm -f ${f.pid} ${f.acp} ${f.tty}`,

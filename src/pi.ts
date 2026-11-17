@@ -12,8 +12,10 @@ import type { AcpProvider } from "./acp-chat.ts";
 export interface PiOptions {
   id?: string;
   displayName?: string;
-  // Where the sessions' sockets and workspaces go, in the place `shell` runs.
+  // Where the sessions' sockets go, in the place `shell` runs, and their workspaces (`workspaces`: a folder, with
+  // `{project}` for the directory a session was given, "{project}__workspaces" say; `<dir>/workspaces` by default).
   dir: string;
+  workspaces?: string;
   // pi's command line there, and the extension's path there.
   pi?: string[];
   extension?: string;
@@ -29,10 +31,11 @@ const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 export function piAgent(opts: PiOptions): AcpProvider {
   const shell = opts.shell ?? ((script: string) => ["sh", "-c", script]);
   const command = [...(opts.pi ?? ["pi"]), "-e", opts.extension ?? EXTENSION].map(quote).join(" ");
-  // A session's files there, quoted for its scripts.
-  const files = (session: string) => {
+  // A session's files there, quoted for its scripts (its workspace's for the directory it was given, CWD).
+  const files = (session: string, cwd = "") => {
     const run = `${opts.dir}/run/${session}`;
-    return { run: quote(`${opts.dir}/run`), workspaces: quote(`${opts.dir}/workspaces`), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), workspace: quote(`${opts.dir}/workspaces/${session}`) };
+    const workspaces = (opts.workspaces ?? `${opts.dir}/workspaces`).replaceAll("{project}", cwd);
+    return { run: quote(`${opts.dir}/run`), workspaces: quote(workspaces), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), workspace: quote(`${workspaces}/${session}`) };
   };
   // Whether the session's pi is running: its terminal's socket takes a connection (one left by a crash or a reboot
   // doesn't, and a pid may have been reused since).
@@ -45,7 +48,7 @@ export function piAgent(opts: PiOptions): AcpProvider {
     connect(session, cwd) {
       const socket = `${opts.dir}/run/${session}.sock`;
       if (Buffer.byteLength(socket) > SOCKET_MAX) throw new Error(`${socket} is too long for a Unix socket: give pi a shorter dir than ${opts.dir}`);
-      const f = files(session);
+      const f = files(session, cwd);
       return shell(
         [
           "set -e",
@@ -67,7 +70,7 @@ export function piAgent(opts: PiOptions): AcpProvider {
       return shell(`${running(f.tty)} && kill "$(cat ${f.pid})"; true`);
     },
     dispose(session, cwd) {
-      const f = files(session);
+      const f = files(session, cwd);
       return shell(
         [
           `${running(f.tty)} && kill "$(cat ${f.pid})"`,

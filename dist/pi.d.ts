@@ -3,6 +3,7 @@ export interface PiOptions {
     id?: string;
     displayName?: string;
     dir: string;
+    workspaces?: string;
     pi?: string[];
     extension?: string;
     shell?: (script: string) => string[];

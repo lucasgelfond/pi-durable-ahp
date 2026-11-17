@@ -23,11 +23,12 @@ machine, so reach it from elsewhere through something like Tailscale or ssh. It 
 (`"pi"`, needs `pi`, `dtach` and `jj`), Claude Code and Gemini CLI. The config, JSON:
 
 ```json
-{ "providers": [{ "id": "…", "displayName": "…", "command": "…", "args": [] }], "pi": { "provider": "…", "modelId": "…" }, "piCommand": ["pi"] }
+{ "providers": [{ "id": "…", "displayName": "…", "command": "…", "args": [] }], "pi": { "provider": "…", "modelId": "…" }, "piCommand": ["pi"], "piWorkspaces": "{project}__workspaces" }
 ```
 
 `providers` replaces Claude Code and Gemini CLI; `pi` adds pi-durable's own coding agent with that model;
-`piCommand` is how pi is started.
+`piCommand` is how pi is started; `piWorkspaces` where each session's jj workspace goes (`{project}` is the
+repo it was given; beside it, `<repo>__workspaces/<session>`, by default).
 
 ## As a library
 

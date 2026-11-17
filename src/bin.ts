@@ -24,7 +24,7 @@ import { durableAhp } from "./sessions.ts";
 //   pi-durable-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
 //
 // The config, JSON: { "providers": [{ "id", "displayName", "command", "args"?, "env"? }], "pi"?: { "provider", "modelId" },
-// "piCommand"?: ["pi", …] }. pi in its own terminal ("pi") is always there; beside it the config's providers, or
+// "piCommand"?: ["pi", …], "piWorkspaces"?: "{project}__workspaces" }. pi in its own terminal ("pi") is always there; beside it the config's providers, or
 // without them the agents below.
 
 const home = join(homedir(), ".concourse");
@@ -41,9 +41,10 @@ const { values: args } = parseArgs({
     port: { type: "string" },
   },
 });
-const config = (existsSync(args.config!) ? JSON.parse(readFileSync(args.config!, "utf8")) : {}) as { providers?: AcpProvider[]; pi?: { provider: string; modelId: string }; piCommand?: string[] };
-// pi on PATH (or the config's piCommand), in a terminal of its own (pi.ts), its files beside the database.
-const tui = piAgent({ dir: dirname(args.db!), pi: config.piCommand });
+const config = (existsSync(args.config!) ? JSON.parse(readFileSync(args.config!, "utf8")) : {}) as { providers?: AcpProvider[]; pi?: { provider: string; modelId: string }; piCommand?: string[]; piWorkspaces?: string };
+// pi on PATH (or the config's piCommand), in a terminal of its own (pi.ts), its files beside the database, its
+// workspaces beside the repo (or the config's piWorkspaces).
+const tui = piAgent({ dir: dirname(args.db!), pi: config.piCommand, workspaces: config.piWorkspaces ?? "{project}__workspaces" });
 const ctx = BACKGROUND_CONTEXT;
 
 mkdirSync(dirname(args.db!), { recursive: true });
