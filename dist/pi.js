@@ -15,7 +15,7 @@ export function piAgent(opts) {
     const files = (session, cwd = "") => {
         const run = `${opts.dir}/run/${session}`;
         const workspaces = (opts.workspaces ?? `${opts.dir}/workspaces`).replaceAll("{project}", cwd);
-        return { run: quote(`${opts.dir}/run`), workspaces: quote(workspaces), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), workspace: quote(`${workspaces}/${session}`) };
+        return { run: quote(`${opts.dir}/run`), workspaces: quote(workspaces), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), err: quote(`${run}.err`), workspace: quote(`${workspaces}/${session}`) };
     };
     // Whether the session's pi is running: its terminal's socket takes a connection (one left by a crash or a reboot
     // doesn't, and a pid may have been reused since).
@@ -33,9 +33,10 @@ export function piAgent(opts) {
             const revision = revisionOf(given);
             return shell([
                 "set -e",
-                `mkdir -p ${f.run} ${f.workspaces}`,
+                `mkdir -p ${f.run}`,
                 `cd ${quote(cwd)}`,
                 "if [ -d .jj/repo ]; then",
+                `  mkdir -p ${f.workspaces}`,
                 `  if [ ! -d ${f.workspace} ]; then`,
                 ...(revision === undefined
                     ? [`    jj workspace add --quiet --name ${quote(session)} ${f.workspace}`]
@@ -49,10 +50,14 @@ export function piAgent(opts) {
                 `  cd ${f.workspace}`,
                 "fi",
                 `if ! ${running(f.tty)}; then`,
-                `  rm -f ${f.acp} ${f.tty}`,
-                `  PI_ACP_SOCKET=${f.acp} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; exec ${command} --session-id ${quote(session)}`)}`,
+                `  rm -f ${f.acp} ${f.tty} ${f.err}`,
+                `  PI_ACP_SOCKET=${f.acp} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; exec ${command} --session-id ${quote(session)} 2>${f.err}`)}`,
                 "fi",
-                `i=0; until [ -S ${f.acp} ]; do i=$((i+1)); [ $i -lt 600 ] || { echo "pi didn't start" >&2; exit 1; }; sleep 0.05; done`,
+                // Until its socket is there; a pi that exited (its terminal gone) says why at once.
+                `i=0; until [ -S ${f.acp} ]; do`,
+                `  ${running(f.tty)} || { tail -n 3 ${f.err} >&2; exit 1; }`,
+                `  i=$((i+1)); [ $i -lt 600 ] || { echo "pi didn't start" >&2; exit 1; }; sleep 0.05`,
+                "done",
                 `exec nc -U ${f.acp}`,
             ].join("\n"));
         },
@@ -70,7 +75,7 @@ export function piAgent(opts) {
             const f = files(session, cwd);
             return shell([
                 `${running(f.tty)} && kill "$(cat ${f.pid})"`,
-                `rm -f ${f.pid} ${f.acp} ${f.tty}`,
+                `rm -f ${f.pid} ${f.acp} ${f.tty} ${f.err}`,
                 `if [ -d ${f.workspace} ]; then (cd ${quote(cwd)} && jj workspace forget ${quote(session)}) 2>/dev/null; rm -rf ${f.workspace}; fi`,
                 "true",
             ].join("\n"));

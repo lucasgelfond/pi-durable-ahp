@@ -146,12 +146,12 @@ export function durableAhp(opts) {
     const chats = new Map();
     // Each open session's other chats as last told, by key.
     const shown = new Map();
-    const statusChanged = (session, uri) => (status) => {
+    const statusChanged = (session, uri) => (status, activity) => {
         const at = new Date().toISOString();
         if (host.has(`${SESSION}${session}`))
             host.dispatch(`${SESSION}${session}`, act({ type: "session/chatUpdated", chat: uri, changes: { status, modifiedAt: at } }));
         if (uri === chatUri(session))
-            void summaryChanged(session, { status, modifiedAt: at }).catch(quiet);
+            void summaryChanged(session, { status, modifiedAt: at, ...(activity && { activity }) }).catch(quiet);
     };
     // A session's summary changed, to every client: CHANGES, its status (an activity, or as it was) with its flags.
     async function summaryChanged(session, changes = {}) {

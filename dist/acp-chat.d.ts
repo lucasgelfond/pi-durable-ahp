@@ -35,7 +35,7 @@ export declare class AcpChat {
     readonly provider: AcpProvider;
     readonly cwd: string;
     readonly given?: Record<string, unknown>;
-    readonly onStatus?: (status: number) => void;
+    readonly onStatus?: (status: number, activity?: string) => void;
     readonly onSession?: (sessionId: string) => Promise<void>;
     readonly onTitle?: (title: string) => void;
     readonly onTurn?: (turn: Shown, ids: string[]) => void;
@@ -51,7 +51,7 @@ export declare class AcpChat {
         session?: string;
         transcript?: Transcript;
         paused?: boolean;
-        onStatus?: (status: number) => void;
+        onStatus?: (status: number, activity?: string) => void;
         onSession?: (sessionId: string) => Promise<void>;
         onTitle?: (title: string) => void;
         onTurn?: (turn: Shown, ids: string[]) => void;
