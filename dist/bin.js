@@ -19,13 +19,13 @@ import { durableAhp } from "./sessions.js";
 // user can open, and on 127.0.0.1 if asked for a port: nothing listens beyond this machine. An
 // agent's process is started (npx fetching it, the first time) only once one of its sessions is used.
 //
-//   pi-durable-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
+//   pi-durable-ahp [--config ~/.pi-durable-ahp/host.json] [--socket ~/.pi-durable-ahp/host.sock] [--db ~/.pi-durable-ahp/host.db] [--port N]
 //     [--extension FILE]...   (more pi extensions for every session's pi)
 //
 // The config, JSON: { "providers": [{ "id", "displayName", "command", "args"?, "env"? }], "pi"?: { "provider", "modelId" },
 // "piCommand"?: ["pi", …], "piWorkspaces"?: "{project}__workspaces" }. pi in its own terminal ("pi") is always there; beside it the config's providers, or
 // without them the agents below.
-const home = join(homedir(), ".concourse");
+const home = join(homedir(), ".pi-durable-ahp");
 const AGENTS = [
     { id: "claude", displayName: "Claude Code", command: "npx", args: ["-y", "@agentclientprotocol/claude-agent-acp@0.99.1"] },
     { id: "gemini", displayName: "Gemini CLI", command: "npx", args: ["-y", "@google/gemini-cli@0.66.0", "--acp"] },

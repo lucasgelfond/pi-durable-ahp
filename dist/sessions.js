@@ -212,15 +212,16 @@ export function durableAhp(opts) {
         chat.open(titleOf(session, doc));
     }
     // Where a session's agent says it works (pi.ts: its workspace), once it says so: the session's working directory.
+    // Said even when it's the directory it was given (not a jj repo): a client hears its agent is up.
     async function worksIn(session, cwd) {
         const doc = await read();
-        const before = doc.work[session] ?? doc.dirs[session];
-        if (before === cwd)
+        if (doc.work[session] === cwd)
             return;
+        const before = doc.work[session] ?? doc.dirs[session];
         await update((d) => void (d.work[session] = cwd));
         const uri = `${SESSION}${session}`;
         const directory = pathToFileURL(cwd).href;
-        if (host.has(uri))
+        if (host.has(uri) && before !== cwd)
             host.dispatch(uri, act(before ? { type: "session/workingDirectoryReplaced", directory: pathToFileURL(before).href, replacement: directory } : { type: "session/workingDirectorySet", directory }));
         await summaryChanged(session, { workingDirectories: [directory] });
     }
