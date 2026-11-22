@@ -15,7 +15,7 @@ running (a box asleep or gone), and it reconnects to an agent that runs on its o
 ## A host on this machine
 
 ```sh
-npx pi-durable-ahp [--config ~/.concourse/host.json] [--socket ~/.concourse/host.sock] [--db ~/.concourse/host.db] [--port N]
+npx pi-durable-ahp [--config ~/.pi-durable-ahp/host.json] [--socket ~/.pi-durable-ahp/host.sock] [--db ~/.pi-durable-ahp/host.db] [--port N]
 ```
 
 AHP at `/ahp`, on a Unix socket only you can open (and on 127.0.0.1 with `--port`); nothing listens beyond this

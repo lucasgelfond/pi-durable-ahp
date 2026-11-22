@@ -411,6 +411,28 @@ test("a directory that is not a jj repo gets no workspaces folder beside it: pi 
   c.ws.close();
 });
 
+test("outside a jj repo, the session's working directory is said once its pi is up, though it's the one given", async () => {
+  // Its real path: pi says that one (the temporary folder's /var is a link).
+  const plain = realpathSync(mkdtempSync(join(root, "plain-")));
+  const host = await serve({ providers: [piAgent({ dir: mkdtempSync(join(root, "files-")), pi: PI })] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const catalogue = await c.c.subscribe("ahp-root://");
+  const changes: { session: string; changes: { workingDirectories?: string[] } }[] = [];
+  void (async () => {
+    for await (const event of catalogue.subscription) {
+      const e = event as { type: string; params?: (typeof changes)[number] };
+      if (e.type === "sessionSummaryChanged" && e.params) changes.push(e.params);
+    }
+  })();
+  const id = randomUUID();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(plain).href] } as never);
+  const said = () => changes.find((ch) => ch.session === `ahp-session:/${id}` && ch.changes.workingDirectories);
+  await until(() => said() !== undefined, 30_000);
+  expect(said()!.changes.workingDirectories).toEqual([pathToFileURL(plain).href]);
+  c.ws.close();
+});
+
 test("a pi that can't start makes the session's status AHP's error, its reason the activity, as soon as it fails", async () => {
   const repo = mkdtempSync(join(root, "repo-"));
   run(repo, "jj", "git", "init", "--quiet");
