@@ -47,7 +47,7 @@ export function piAgent(opts: PiOptions): AcpProvider {
   const files = (session: string, cwd = "") => {
     const run = `${opts.dir}/run/${session}`;
     const workspaces = (opts.workspaces ?? `${opts.dir}/workspaces`).replaceAll("{project}", cwd);
-    return { run: quote(`${opts.dir}/run`), workspaces: quote(workspaces), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), err: quote(`${run}.err`), workspace: quote(`${workspaces}/${session}`) };
+    return { run: quote(`${opts.dir}/run`), workspaces: quote(workspaces), tty: quote(`${run}.tty`), acp: quote(`${run}.sock`), pid: quote(`${run}.pid`), err: quote(`${run}.err`), sessions: quote(`${run}.sessions`), workspace: quote(`${workspaces}/${session}`) };
   };
   // Whether the session's pi is running: its terminal's socket takes a connection (one left by a crash or a reboot
   // doesn't, and a pid may have been reused since).
@@ -83,7 +83,8 @@ export function piAgent(opts: PiOptions): AcpProvider {
           "fi",
           `if ! ${running(f.tty)}; then`,
           `  rm -f ${f.acp} ${f.tty} ${f.err}`,
-          `  PI_ACP_SOCKET=${f.acp} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; exec ${command} --session-id ${quote(session)} 2>${f.err}`)}`,
+          // On the pi session it was on last (its bridge keeps each one it moved to: /new, /resume, a fork), else its own.
+          `  PI_ACP_SOCKET=${f.acp} PI_SESSIONS_FILE=${f.sessions} dtach -n ${f.tty} -z sh -c ${quote(`echo $$ > ${f.pid}; last=$(tail -n 1 ${f.sessions} 2>/dev/null); exec ${command} --session-id "\${last:-${session}}" 2>${f.err}`)}`,
           "fi",
           // Until its socket is there; a pi that exited (its terminal gone) says why at once.
           `i=0; until [ -S ${f.acp} ]; do`,
@@ -109,7 +110,7 @@ export function piAgent(opts: PiOptions): AcpProvider {
       return shell(
         [
           `${running(f.tty)} && kill "$(cat ${f.pid})"`,
-          `rm -f ${f.pid} ${f.acp} ${f.tty} ${f.err}`,
+          `rm -f ${f.pid} ${f.acp} ${f.tty} ${f.err} ${f.sessions}`,
           `if [ -d ${f.workspace} ]; then (cd ${quote(cwd)} && jj workspace forget ${quote(session)}) 2>/dev/null; rm -rf ${f.workspace}; fi`,
           "true",
         ].join("\n"),

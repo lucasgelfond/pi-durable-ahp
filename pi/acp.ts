@@ -17,8 +17,8 @@
 // working. Each message's messageId is its role and timestamp, the same live and replayed.
 import * as acp from "@agentclientprotocol/sdk";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { mkdirSync, rmSync } from "node:fs";
-import { createServer, type Server } from "node:net";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
+import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -51,6 +51,7 @@ function updates(m: Message): acp.SessionUpdate[] {
 
 export default function (pi: ExtensionAPI) {
   let server: Server | undefined;
+  const sockets = new Set<Socket>();
   let path = "";
   let ctx: ExtensionContext | undefined;
   let sessionId = "";
@@ -147,18 +148,32 @@ export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, c) => {
     ctx = c;
     sessionId = c.sessionManager.getSessionId();
+    // Each pi session this one moved to (/new, /resume, a fork), oldest first: the host starts pi again on the last.
+    const kept = process.env.PI_SESSIONS_FILE;
+    if (kept) {
+      const ids = existsSync(kept) ? readFileSync(kept, "utf8").split("\n").filter(Boolean) : [];
+      if (ids.at(-1) !== sessionId) appendFileSync(kept, `${sessionId}\n`);
+    }
+    // A client following this pi hears the session it's on now.
+    if (server) state(working);
     if (server) return;
     path = process.env.PI_ACP_SOCKET || join(tmpdir(), `pi-acp-${process.getuid?.() ?? "u"}`, `${sessionId}.sock`);
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     rmSync(path, { force: true });
     server = createServer((socket) => {
       socket.on("error", () => {});
+      sockets.add(socket);
+      socket.on("close", () => sockets.delete(socket));
       agent.connect(acp.ndJsonStream(Writable.toWeb(socket) as WritableStream<Uint8Array>, Readable.toWeb(socket) as ReadableStream<Uint8Array>));
     });
     server.on("error", (err) => console.error(`pi acp socket: ${err.message}`));
     server.listen(path);
   });
+  // pi moving to another session (/new, /resume, a fork) shuts this instance down and starts another, with a server of
+  // its own: its clients' connections end too, so they connect to that one (they'd hear nothing here).
   pi.on("session_shutdown", () => {
+    for (const socket of sockets) socket.destroy();
+    sockets.clear();
     server?.close();
     server = undefined;
     if (path) rmSync(path, { force: true });

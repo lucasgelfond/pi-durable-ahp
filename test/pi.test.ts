@@ -64,6 +64,32 @@ afterAll(() => {
 });
 
 // A jj repo, a host whose "pi" agent keeps its files in `dir`, a client, and a pi session in the repo, followed.
+test("a pi that moves to another session (/new in its terminal) is followed there, keeps each one it was on, and is started again on the last", async () => {
+  const s = await session();
+  const kept = join(s.dir, "run", `${s.id}.sessions`);
+  s.prompt("in the first session");
+  await until(() => s.chat.state.turns.length === 1, 30_000);
+  const typed = (text: string) => spawn("dtach", ["-p", s.files.tty], { stdio: ["pipe", "ignore", "ignore"] }).stdin.end(text);
+  typed("/new\r");
+  await until(() => existsSync(kept) && readFileSync(kept, "utf8").split("\n").filter(Boolean).length === 2, 15_000);
+  const [first, second] = readFileSync(kept, "utf8").split("\n").filter(Boolean);
+  expect(first).toBe(s.id);
+  typed("in the second session\r");
+  await until(() => s.chat.state.turns.some((t) => t.message.text === "in the second session" && t.state === "complete"), 30_000);
+
+  const pid = Number(readFileSync(s.files.pid, "utf8"));
+  s.c.c.dispatch(`ahp-session:/${s.id}`, { type: "session/isArchivedChanged", isArchived: true } as never);
+  await until(() => !isRunning(pid), 10_000);
+  s.c.c.dispatch(`ahp-session:/${s.id}`, { type: "session/isArchivedChanged", isArchived: false } as never);
+  await until(() => existsSync(s.files.acp), 30_000);
+  s.prompt("after reopening");
+  await until(() => s.chat.state.turns.some((t) => t.message.text === "after reopening" && t.state === "complete"), 30_000);
+  // Started again on the second: what's said now goes on there.
+  const file = readFileSync(sessionFile(second), "utf8");
+  expect([file.includes("in the second session"), file.includes("after reopening"), readFileSync(sessionFile(first), "utf8").includes("after reopening")]).toEqual([true, true, false]);
+  s.c.ws.close();
+}, 90_000);
+
 async function session(shell?: (script: string) => string[], dir = mkdtempSync(join(root, "files-"))) {
   const repo = mkdtempSync(join(root, "repo-"));
   run(repo, "jj", "git", "init", "--quiet");

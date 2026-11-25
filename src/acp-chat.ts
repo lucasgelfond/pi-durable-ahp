@@ -203,7 +203,8 @@ export class AcpChat {
       // An agent that is one running session: that one, and where it works.
       if (this.provider.follow) {
         const [running] = (await race(agent.request(acp.methods.agent.session.list, {}))).sessions;
-        this.#session ??= running?.sessionId;
+        // The session it's running is the one (it may have moved to another since: /new, /resume).
+        this.#session = running?.sessionId ?? this.#session;
         if (running?.cwd) this.onCwd?.(running.cwd);
       }
       const before = this.#session;
@@ -329,7 +330,11 @@ export class AcpChat {
   }
 
   #update(n: acp.SessionNotification) {
-    if (this.#session && n.sessionId !== this.#session) return;
+    if (this.#session && n.sessionId !== this.#session) {
+      // An agent that is one running session (pi) moved to another (/new, /resume): that's the one it is now.
+      if (!this.provider.follow) return;
+      this.#session = n.sessionId;
+    }
     const u = n.update;
     if (this.#loading) return this.#replayed(u);
     if (u.sessionUpdate === "session_info_update") {
