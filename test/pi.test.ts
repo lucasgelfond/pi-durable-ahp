@@ -124,6 +124,25 @@ test.for(places)("the session's _meta says how to open pi's terminal $place (onc
   terminal.kill();
 });
 
+// As TERMINAL, then the window made narrower (100 by 40) after 4 s, as a client's pane can be.
+const RESIZED = TERMINAL.replace("while True:", "import threading, time\nthreading.Timer(4, lambda: fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('HHHH', 40, 100, 0, 0))).start()\nwhile True:");
+
+test("pi's terminal is its regular TUI: an attached client gets no alternate screen it would miss, and a resize draws the transcript again at the new width", async () => {
+  const s = await session(undefined);
+  s.prompt("shown in the terminal");
+  await until(() => s.chat.state.turns.length === 1, 30_000);
+  const { items } = await s.c.c.request("listSessions", { channel: "ahp-root://" });
+  const attach = (items.find((i) => i.resource === `ahp-session:/${s.id}`)?._meta as { pi?: { attach?: string[] } } | undefined)?.pi?.attach;
+  const terminal = spawn("python3", ["-c", RESIZED, ...attach!], { stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  terminal.stdout.setEncoding("utf8").on("data", (d: string) => (out += d));
+  await until(() => out.includes("echo: shown in the terminal"), 15_000);
+  const before = out.length;
+  await until(() => out.slice(before).includes("\x1b[3J") && out.slice(out.lastIndexOf("\x1b[3J")).includes("echo: shown in the terminal"), 15_000);
+  terminal.kill();
+  expect(out.includes("\x1b[?1049h")).toBe(false);
+});
+
 test.for(places)("what's typed in pi's own terminal $place is a turn in the chat, and pi keeps running when its terminal goes", async ({ shell }) => {
   const s = await session(shell);
   const other = await client(s.host.url);
@@ -479,6 +498,30 @@ test("`extensions` are loaded into every session's pi, beside its own", async ()
   expect([said(chat.state.turns[0]), marked]).toEqual(["echo: hello", true]);
   c.ws.close();
 });
+
+test("a name pi gives its session (pi.setSessionName) is its title at once, while the turn goes on; a later first message leaves it", async () => {
+  const extension = join(root, "names.ts");
+  // As a title from a model would: named a moment into the turn (the faux model's "wait" takes 5 s).
+  writeFileSync(extension, 'export default function (pi) {\n  pi.on("input", (event) => {\n    if (event.text.includes("name it")) setTimeout(() => pi.setSessionName("Named by pi"), 1000);\n  });\n}\n');
+  const repo = mkdtempSync(join(root, "repo-"));
+  run(repo, "jj", "git", "init", "--quiet");
+  const host = await serve({ providers: [piAgent({ dir: mkdtempSync(join(root, "files-")), pi: PI, extensions: [extension] })] });
+  hosts.push(host.close);
+  const c = await client(host.url);
+  const id = randomUUID();
+  await c.c.request("createSession", { channel: `ahp-session:/${id}`, provider: "pi", workingDirectories: [pathToFileURL(repo).href] } as never);
+  const chat = (await follow(c.c, `ahp-chat:/${id}`)) as unknown as Chat;
+  const titled = async () => (await c.c.request("listSessions", { channel: "ahp-root://" })).items.find((s) => s.resource === `ahp-session:/${id}`)?.title;
+  // "wait": the faux model takes 5 s, so the name has to come before the turn's end.
+  c.c.dispatch(`ahp-chat:/${id}`, { type: "chat/turnStarted", turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: "name it, then wait", origin: { kind: "user" } } } as never);
+  await until(async () => (await titled()) === "Named by pi", 3_500);
+  expect(chat.state.turns.length).toBe(0);
+  await until(() => chat.state.turns.length === 1, 15_000);
+  c.c.dispatch(`ahp-chat:/${id}`, { type: "chat/turnStarted", turnId: randomUUID(), startedAt: new Date().toISOString(), message: { text: "another message", origin: { kind: "user" } } } as never);
+  await until(() => chat.state.turns.length === 2, 15_000);
+  expect(await titled()).toBe("Named by pi");
+  c.ws.close();
+}, 40_000);
 
 test("deleting the session ends its pi and forgets its workspace", async () => {
   const s = await session();

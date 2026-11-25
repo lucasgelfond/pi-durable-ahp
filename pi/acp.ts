@@ -135,6 +135,8 @@ export default function (pi: ExtensionAPI) {
   });
   pi.on("tool_execution_start", (event) => send({ sessionUpdate: "tool_call", toolCallId: event.toolCallId, title: title(event.toolName, event.args), kind: "other", status: "in_progress", rawInput: event.args }));
   pi.on("agent_start", () => state(true));
+  // A name pi is given (/name, an extension's pi.setSessionName) is the session's title at once, not at the turn's end.
+  pi.on("session_info_changed", () => state(working));
   pi.on("agent_end", (event) => {
     state(false);
     const aborted = cancelled || event.messages.some((m) => "stopReason" in m && m.stopReason === "aborted");

@@ -36,7 +36,13 @@ const quote = (s: string) => `'${s.replaceAll("'", `'\\''`)}'`;
 
 export function piAgent(opts: PiOptions): AcpProvider {
   const shell = opts.shell ?? ((script: string) => ["sh", "-c", script]);
-  const command = [...(opts.pi ?? ["pi"]), ...[opts.extension ?? EXTENSION, ...(opts.extensions ?? [])].flatMap((e) => ["-e", e])].map(quote).join(" ");
+  // pi's regular TUI (the terminal's own scrollback), unless its command line picks one: a client attaches to pi's
+  // terminal after pi set it up, and dtach replays nothing, so a fullscreen pi's alternate screen and modes never reach
+  // it (its frames pile up in the client's scrollback, its mouse scrolls the client). A regular pi draws everything
+  // again, at the new width, when its size changes.
+  const pi = opts.pi ?? ["pi"];
+  const mode = pi.some((a) => a === "--tui-mode" || a.startsWith("--tui-mode=")) ? [] : ["--tui-mode", "regular"];
+  const command = [...pi, ...mode, ...[opts.extension ?? EXTENSION, ...(opts.extensions ?? [])].flatMap((e) => ["-e", e])].map(quote).join(" ");
   // A session's files there, quoted for its scripts (its workspace's for the directory it was given, CWD).
   const files = (session: string, cwd = "") => {
     const run = `${opts.dir}/run/${session}`;
